@@ -10,10 +10,13 @@ Android版サイネージクライアント。サーバー(signage-server)から
 ```
 
 ## Architecture
-- **WebViewベース**: コンテンツ表示はWebView x2 (A/B交互フェード切替)
-- **PDF表示**: assets内のpdf-viewer.html + PDF.js (CDN) でWebView内レンダリング
+- **WebViewベース**: コンテンツ表示はWebView x2 (A/B交互フェード切替、背面先読み)
+- **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避)
+- **先読み**: standbyWebViewにコンテンツを事前ロード、完了後にフェード切替(ちらつき防止)
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
+- **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
+- **ターゲット端末**: DS-ASTBX5 (Android STB)
 
 ## Package Structure
 ```
@@ -43,6 +46,9 @@ jp.co.tisa.signage_android/
 ## Key Design Decisions
 - minSdk = 24, targetSdk = 36
 - Kotlin + Jetpack Compose (Setup画面のみ) + WebView (コンテンツ表示)
-- OkHttp for HTTP (プロキシ設定が容易)
+- OkHttp for HTTP (プロキシ設定が容易、response.use{}で確実にclose)
 - Gson for JSON serialization
 - Foreground Service for heartbeat (Android制約対応)
+- PDF表示はBase64注入方式 (file://間のCORS制約回避)
+- WebView A/B先読み+standbyReadyフラグでちらつき防止
+- setInitialScale(100) + loadWithOverviewMode=false でズーム固定

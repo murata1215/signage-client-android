@@ -1,0 +1,122 @@
+# signage-client-android
+
+Android版デジタルサイネージクライアント。サーバー (signage-server) からスケジュールを取得し、Web/PDFコンテンツをローテーション表示する専用端末向けアプリ。
+
+Linux版 (Electron) の Android 移植版。
+
+## 機能
+
+- **初回セットアップ画面** - サーバーURL + Client Key 入力、接続テスト
+- **Webコンテンツ表示** - WebView でURL表示
+- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング
+- **A/Bクロスフェード切替** - WebView 2枚で背面先読み + 800msフェードアニメーション
+- **スケジュールポーリング** - version ベースの差分検知、コンテンツ切替時にも更新チェック
+- **ハートビート送信** - Foreground Service で定期送信 (管理画面の稼働監視用)
+- **リモコン操作** - DPAD左右で前後移動、決定で一時停止/再開
+- **タッチジェスチャー** - スワイプで前後移動、ダブルタップで一時停止/再開
+- **PDFキャッシュ** - 内部ストレージにダウンロード・キャッシュ管理
+- **オフラインフォールバック** - サーバー到達不可時はキャッシュから再生継続
+- **再生時間帯判定** - play_start_time / play_end_time による自動待機
+- **キオスクモード** - フルスクリーン、画面常時ON、Boot時自動起動
+- **プロキシ対応** - OkHttp で社内プロキシ経由、ローカルIPバイパス
+- **ステータスバー** - コンテンツ名 + カウントダウン表示
+
+## 動作環境
+
+- **ターゲット端末**: DS-ASTBX5 (Android STB) / 一般的なAndroid端末
+- **minSdk**: 24 (Android 7.0)
+- **targetSdk**: 36
+
+## 技術スタック
+
+| コンポーネント | 技術 |
+|--------------|------|
+| 言語 | Kotlin |
+| UI (セットアップ) | Jetpack Compose + Material3 |
+| UI (コンテンツ表示) | WebView x2 (A/B交互切替) |
+| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 |
+| HTTP通信 | OkHttp 4.x (プロキシ対応) |
+| JSON | Gson |
+| 非同期処理 | Kotlin Coroutines |
+| バックグラウンド | Foreground Service |
+| 自動起動 | BOOT_COMPLETED BroadcastReceiver |
+
+## ビルド
+
+```bash
+./gradlew assembleDebug    # デバッグビルド
+./gradlew assembleRelease  # リリースビルド
+```
+
+## パッケージ構成
+
+```
+jp.co.tisa.signage_android/
+├── MainActivity.kt          # エントリポイント (Setup or Player起動)
+├── data/
+│   ├── Models.kt            # データクラス (ScheduleResponse, PlaylistItem等)
+│   ├── ConfigManager.kt     # SharedPreferences 設定管理
+│   └── ServerClient.kt      # OkHttp API通信 (プロキシ対応)
+├── player/
+│   ├── PlayerActivity.kt    # WebView再生画面 (フルスクリーン)
+│   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
+│   └── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+├── service/
+│   ├── SignageService.kt     # Foreground Service (ハートビート送信)
+│   └── BootReceiver.kt      # BOOT_COMPLETED 自動起動
+└── ui/
+    ├── SetupScreen.kt        # 初回設定画面 (Compose)
+    └── theme/                # テーマ
+```
+
+## 操作方法
+
+### リモコン (DS-ASTBX5等)
+
+| ボタン | 動作 |
+|--------|------|
+| 右 / CH+ | 次のコンテンツ |
+| 左 / CH- | 前のコンテンツ |
+| 決定 / ENTER | 一時停止/再開 |
+
+### タッチ操作 (スマホ等)
+
+| 操作 | 動作 |
+|------|------|
+| 左スワイプ | 次のコンテンツ |
+| 右スワイプ | 前のコンテンツ |
+| ダブルタップ | 一時停止/再開 |
+
+## サーバー連携 API
+
+| メソッド | エンドポイント | 用途 |
+|---------|-------------|------|
+| GET | `/api/player/schedule?key={client_key}` | スケジュール取得 |
+| POST | `/api/player/heartbeat?key={client_key}` | ハートビート送信 |
+| GET | `/api/player/content/:id/file?key={client_key}` | PDFダウンロード |
+
+## 起動フロー
+
+```
+アプリ起動
+  ├── config なし → セットアップ画面 → URL+Key入力 → 保存
+  └── config あり → Foreground Service 開始 → PlayerActivity 起動
+        ├── スケジュール取得 (サーバー → キャッシュ → フォールバック)
+        ├── PDF ダウンロード・キャッシュ
+        ├── 時間帯判定
+        │   ├── 時間帯内 → ローテーション再生開始
+        │   └── 時間帯外 → 待機画面
+        ├── ハートビート送信ループ
+        └── バックグラウンドポーリング (コンテンツ切替時にも更新チェック)
+```
+
+## プロキシ設定
+
+| 項目 | 値 |
+|------|-----|
+| プロキシサーバー | 210.175.128.100:8080 |
+| バイパス | 10.x, 172.16-31.x, 192.168.x, localhost |
+
+## ライセンス
+
+Private
