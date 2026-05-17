@@ -1,6 +1,7 @@
 package jp.co.tisa.signage_android.player
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -53,6 +54,11 @@ class PlayerActivity : ComponentActivity() {
     private var isPlaying = false
     private var isPaused = false
     private var standbyReady = false
+
+    // Triple-tap detection for reset to setup
+    private var tapCount = 0
+    private var lastTapTime = 0L
+    private val TRIPLE_TAP_TIMEOUT = 500L
 
     private lateinit var gestureDetector: GestureDetector
 
@@ -126,8 +132,20 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
 
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                // Single tap does nothing (avoids conflict with double tap)
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                // Triple-tap detection for reset to setup
+                val now = System.currentTimeMillis()
+                if (now - lastTapTime < TRIPLE_TAP_TIMEOUT) {
+                    tapCount++
+                } else {
+                    tapCount = 1
+                }
+                lastTapTime = now
+                if (tapCount >= 3) {
+                    tapCount = 0
+                    resetToSetup()
+                    return true
+                }
                 return false
             }
         })
@@ -582,6 +600,31 @@ class PlayerActivity : ComponentActivity() {
         }.also {
             handler.postDelayed(it, 1000)
         }
+    }
+
+    // =========================================================================
+    // Reset to Setup
+    // =========================================================================
+
+    private fun resetToSetup() {
+        // Stop playback
+        isPlaying = false
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+        pollingJob?.cancel()
+
+        // Stop foreground service
+        stopService(Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java))
+
+        // Clear config so setup screen appears
+        configManager.clearAll()
+
+        // Launch MainActivity (will show setup screen)
+        val intent = Intent(this, jp.co.tisa.signage_android.MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        finish()
     }
 
     // =========================================================================
