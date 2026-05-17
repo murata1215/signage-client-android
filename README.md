@@ -6,7 +6,7 @@ Linux版 (Electron) の Android 移植版。
 
 ## 機能
 
-- **初回セットアップ画面** - サーバーURL + Client Key 入力、接続テスト
+- **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
 - **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング
 - **A/Bクロスフェード切替** - WebView 2枚で背面先読み + 800msフェードアニメーション
@@ -65,7 +65,7 @@ jp.co.tisa.signage_android/
 │   ├── SignageService.kt     # Foreground Service (ハートビート送信)
 │   └── BootReceiver.kt      # BOOT_COMPLETED 自動起動
 └── ui/
-    ├── SetupScreen.kt        # 初回設定画面 (Compose)
+    ├── SetupScreen.kt        # 設定画面 (Compose、初回設定/設定変更/初期化)
     └── theme/                # テーマ
 ```
 
@@ -86,6 +86,7 @@ jp.co.tisa.signage_android/
 | 左スワイプ | 次のコンテンツ |
 | 右スワイプ | 前のコンテンツ |
 | ダブルタップ | 一時停止/再開 |
+| 5秒長押し | 設定画面を開く |
 
 ## サーバー連携 API
 
@@ -108,6 +109,12 @@ jp.co.tisa.signage_android/
         │   └── 時間帯外 → 待機画面
         ├── ハートビート送信ループ
         └── バックグラウンドポーリング (コンテンツ切替時にも更新チェック)
+
+再生中の設定変更
+  5秒長押し → 設定画面 (現在の値が入った状態)
+    ├── URL/Key変更 → 接続テスト → 保存して開始 → 新設定でPlayer再開
+    ├── 戻る → 変更せずPlayerに戻る
+    └── 設定を初期化 → 確認ダイアログ → OK → フィールド空に
 ```
 
 ## プロキシ設定
@@ -115,7 +122,7 @@ jp.co.tisa.signage_android/
 | 項目 | 値 |
 |------|-----|
 | プロキシサーバー | 210.175.128.100:8080 |
-| バイパス | 10.x, 172.16-31.x, 192.168.x, localhost |
+| バイパス | 10.x, 172.16-31.x, 192.168.x, localhost, atg.co.jp |
 
 ## ライセンス
 
