@@ -55,10 +55,9 @@ class PlayerActivity : ComponentActivity() {
     private var isPaused = false
     private var standbyReady = false
 
-    // Triple-tap detection for reset to setup
-    private var tapCount = 0
-    private var lastTapTime = 0L
-    private val TRIPLE_TAP_TIMEOUT = 500L
+    // Long-press (5 sec) to reset to setup screen
+    private val LONG_PRESS_RESET_MS = 5000L
+    private var longPressResetRunnable: Runnable? = null
 
     private lateinit var gestureDetector: GestureDetector
 
@@ -132,20 +131,8 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
 
-            override fun onSingleTapUp(e: MotionEvent): Boolean {
-                // Triple-tap detection for reset to setup
-                val now = System.currentTimeMillis()
-                if (now - lastTapTime < TRIPLE_TAP_TIMEOUT) {
-                    tapCount++
-                } else {
-                    tapCount = 1
-                }
-                lastTapTime = now
-                if (tapCount >= 3) {
-                    tapCount = 0
-                    resetToSetup()
-                    return true
-                }
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                // Single tap does nothing (avoids conflict with double tap)
                 return false
             }
         })
@@ -282,7 +269,21 @@ class PlayerActivity : ComponentActivity() {
             )
             setOnTouchListener { _, event ->
                 gestureDetector.onTouchEvent(event)
-                true // Always consume to receive full gesture sequence (DOWN/MOVE/UP)
+                // 5-second long press to reset to setup screen
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        longPressResetRunnable?.let { handler.removeCallbacks(it) }
+                        longPressResetRunnable = Runnable { resetToSetup() }
+                        handler.postDelayed(longPressResetRunnable!!, LONG_PRESS_RESET_MS)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        longPressResetRunnable?.let { handler.removeCallbacks(it) }
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        // Cancel if finger moves too much (not a hold)
+                    }
+                }
+                true // Always consume to receive full gesture sequence
             }
         }
         containerLayout.addView(touchOverlay)
@@ -636,6 +637,7 @@ class PlayerActivity : ComponentActivity() {
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        longPressResetRunnable?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
         coroutineScope.cancel()
         webViewA.destroy()
