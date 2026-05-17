@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+        #pdf-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body>
+    <div id="pdf-container">
+        <canvas id="pdf-canvas"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // Use PDF.js 3.x (non-module) to avoid worker/CORS issues in WebView
+        // Disable worker to avoid cross-origin problems
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+
+        let pdfDoc = null;
+        let currentPage = 1;
+        let totalPages = 0;
+        let pageDuration = 10;
+        let pageTimer = null;
+
+        const canvas = document.getElementById('pdf-canvas');
+        const ctx = canvas.getContext('2d');
+
+        async function loadPdfFromData(data) {
+            try {
+                const loadingTask = pdfjsLib.getDocument({ data: data });
+                pdfDoc = await loadingTask.promise;
+                totalPages = pdfDoc.numPages;
+                currentPage = 1;
+                await renderPage(currentPage);
+                startPageRotation();
+            } catch (err) {
+                console.error('PDF load error:', err);
+            }
+        }
+
+        async function renderPage(pageNum) {
+            if (!pdfDoc) return;
+            const page = await pdfDoc.getPage(pageNum);
+
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            const viewport = page.getViewport({ scale: 1 });
+
+            const scaleX = containerWidth / viewport.width;
+            const scaleY = containerHeight / viewport.height;
+            const scale = Math.min(scaleX, scaleY);
+
+            const scaledViewport = page.getViewport({ scale: scale });
+
+            canvas.width = scaledViewport.width;
+            canvas.height = scaledViewport.height;
+
+            const renderContext = {
+                canvasContext: ctx,
+                viewport: scaledViewport
+            };
+
+            await page.render(renderContext).promise;
+
+            // Notify Android about current page
+            if (window.SignageInterface) {
+                window.SignageInterface.onPageChanged(currentPage, totalPages);
+            }
+        }
+
+        function startPageRotation() {
+            if (pageTimer) clearInterval(pageTimer);
+            if (totalPages <= 1) return;
+
+            pageTimer = setInterval(() => {
+                currentPage = (currentPage % totalPages) + 1;
+                renderPage(currentPage);
+            }, pageDuration * 1000);
+        }
+
+        // Called from Android: receives Base64-encoded PDF data
+        window.loadPdfBase64 = function(base64Data, duration) {
+            pageDuration = duration || 10;
+            try {
+                const binaryString = atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                loadPdfFromData(bytes.buffer);
+            } catch (err) {
+                console.error('Base64 decode error:', err);
+            }
+        };
+
+        window.stopPdf = function() {
+            if (pageTimer) {
+                clearInterval(pageTimer);
+                pageTimer = null;
+            }
+        };
+
+        window.getPageInfo = function() {
+            return JSON.stringify({ current: currentPage, total: totalPages });
+        };
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            if (pdfDoc) {
+                renderPage(currentPage);
+            }
+        });
+
+        // Signal ready to Android
+        if (window.SignageInterface) {
+            window.SignageInterface.onPdfViewerReady();
+        }
+    </script>
+</body>
+</html>
