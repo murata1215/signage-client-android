@@ -17,14 +17,46 @@ import kotlinx.coroutines.launch
 @Composable
 fun SetupScreen(
     configManager: ConfigManager,
-    onSetupComplete: () -> Unit
+    onSetupComplete: () -> Unit,
+    onBack: (() -> Unit)? = null
 ) {
-    var serverUrl by remember { mutableStateOf("http://") }
-    var clientKey by remember { mutableStateOf("") }
+    // Load existing config values if available
+    val existingConfig = configManager.getConfig()
+    var serverUrl by remember { mutableStateOf(existingConfig?.serverUrl ?: "http://") }
+    var clientKey by remember { mutableStateOf(existingConfig?.clientKey ?: "") }
     var testResult by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var isTesting by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
+    var showResetDialog by remember { mutableStateOf(false) }
+    val isExistingConfig = existingConfig != null
     val coroutineScope = rememberCoroutineScope()
+
+    // Reset confirmation dialog
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("設定の初期化") },
+            text = { Text("サーバーURL・Client Keyを初期化します。\nよろしいですか？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetDialog = false
+                        configManager.clearAll()
+                        serverUrl = "http://"
+                        clientKey = ""
+                        testResult = null
+                    }
+                ) {
+                    Text("初期化する")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) {
+                    Text("キャンセル")
+                }
+            }
+        )
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -38,7 +70,7 @@ fun SetupScreen(
             verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = "サイネージクライアント 初期設定",
+                text = if (isExistingConfig) "サイネージクライアント 設定" else "サイネージクライアント 初期設定",
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground
             )
@@ -47,7 +79,10 @@ fun SetupScreen(
 
             OutlinedTextField(
                 value = serverUrl,
-                onValueChange = { serverUrl = it },
+                onValueChange = {
+                    serverUrl = it
+                    testResult = null
+                },
                 label = { Text("サーバー URL") },
                 placeholder = { Text("http://192.168.1.100:3000") },
                 modifier = Modifier.fillMaxWidth(0.8f),
@@ -59,7 +94,10 @@ fun SetupScreen(
 
             OutlinedTextField(
                 value = clientKey,
-                onValueChange = { clientKey = it },
+                onValueChange = {
+                    clientKey = it
+                    testResult = null
+                },
                 label = { Text("Client Key") },
                 placeholder = { Text("550e8400-e29b-41d4-a716-446655440000") },
                 modifier = Modifier.fillMaxWidth(0.8f),
@@ -71,6 +109,13 @@ fun SetupScreen(
             Row(
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // Back button (only when editing existing config)
+                if (isExistingConfig && onBack != null) {
+                    OutlinedButton(onClick = onBack) {
+                        Text("戻る")
+                    }
+                }
+
                 OutlinedButton(
                     onClick = {
                         coroutineScope.launch {
@@ -135,6 +180,19 @@ fun SetupScreen(
                         else
                             MaterialTheme.colorScheme.onErrorContainer
                     )
+                }
+            }
+
+            // Reset button (only when existing config)
+            if (isExistingConfig) {
+                Spacer(modifier = Modifier.height(32.dp))
+                TextButton(
+                    onClick = { showResetDialog = true },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("設定を初期化")
                 }
             }
         }

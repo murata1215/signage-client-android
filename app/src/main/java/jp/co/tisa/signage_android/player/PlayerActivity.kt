@@ -617,12 +617,10 @@ class PlayerActivity : ComponentActivity() {
         // Stop foreground service
         stopService(Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java))
 
-        // Clear config so setup screen appears
-        configManager.clearAll()
-
-        // Launch MainActivity (will show setup screen)
+        // Launch MainActivity with settings flag (keep existing config)
         val intent = Intent(this, jp.co.tisa.signage_android.MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("show_settings", true)
         }
         startActivity(intent)
         finish()

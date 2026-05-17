@@ -24,13 +24,19 @@ class MainActivity : ComponentActivity() {
 
         configManager = ConfigManager(this)
 
-        // If already configured, go directly to player
-        if (configManager.isConfigured()) {
+        val showSettings = intent.getBooleanExtra("show_settings", false)
+
+        // If already configured and not forced to show settings, go directly to player
+        if (configManager.isConfigured() && !showSettings) {
             launchPlayer()
             return
         }
 
         // Show setup screen
+        showSetupScreen()
+    }
+
+    private fun showSetupScreen() {
         setContent {
             SignageandroidTheme {
                 Surface(
@@ -41,6 +47,11 @@ class MainActivity : ComponentActivity() {
                         configManager = configManager,
                         onSetupComplete = {
                             launchPlayer()
+                        },
+                        onBack = if (configManager.isConfigured()) {
+                            { launchPlayer() }
+                        } else {
+                            null
                         }
                     )
                 }
