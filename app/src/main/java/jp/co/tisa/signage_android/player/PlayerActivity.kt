@@ -162,6 +162,10 @@ class PlayerActivity : ComponentActivity() {
                 togglePause()
                 true
             }
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                true // Consume to prevent WebView from scrolling/focusing
+            }
             else -> super.onKeyDown(keyCode, event)
         }
     }
@@ -336,6 +340,8 @@ class PlayerActivity : ComponentActivity() {
                 ) + " Chrome/120.0.0.0"
             }
             setInitialScale(100)
+            isFocusable = false
+            isFocusableInTouchMode = false
             webViewClient = WebViewClient()
             webChromeClient = WebChromeClient()
             addJavascriptInterface(PdfJsInterface(), "SignageInterface")
