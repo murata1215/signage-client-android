@@ -41,6 +41,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var webViewA: WebView
     private lateinit var webViewB: WebView
     private lateinit var statusBar: TextView
+    private lateinit var touchOverlay: View
 
     private var activeWebView: WebView? = null
     private var standbyWebView: WebView? = null
@@ -143,6 +144,19 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // When paused (interactive mode), only handle BACK to resume
+        // All other keys pass through to WebView for interaction
+        if (isPaused) {
+            return when (keyCode) {
+                KeyEvent.KEYCODE_BACK -> {
+                    resumePlayback()
+                    true
+                }
+                else -> super.onKeyDown(keyCode, event)
+            }
+        }
+
+        // Normal mode: intercept all navigation keys
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_MEDIA_NEXT,
@@ -171,7 +185,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     // =========================================================================
-    // Playback Control (next / previous / pause)
+    // Playback Control (next / previous / pause / resume)
     // =========================================================================
 
     private fun goToNext() {
@@ -181,7 +195,7 @@ class PlayerActivity : ComponentActivity() {
             scheduleManager.advanceToNext()
             val item = scheduleManager.getCurrentItem() ?: return
             loadContent(activeWebView!!, item)
-            statusBar.text = "${item.name}  |  ⏸ 一時停止中"
+            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
         } else {
             advanceToNext()
         }
@@ -232,7 +246,9 @@ class PlayerActivity : ComponentActivity() {
         val item = scheduleManager.getCurrentItem() ?: return
 
         if (wasPaused) {
-            statusBar.text = "${item.name}  |  ⏸ 一時停止中"
+            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
+            // Re-enable WebView interaction after swap
+            enableWebViewInteraction()
         } else {
             updateStatusBar(item)
             // Schedule next auto-advance
@@ -252,23 +268,56 @@ class PlayerActivity : ComponentActivity() {
     private fun togglePause() {
         if (!isPlaying) return
 
-        isPaused = !isPaused
+        isPaused = true
         val item = scheduleManager.getCurrentItem()
 
-        if (isPaused) {
-            // Stop auto-rotation
-            contentTimer?.let { handler.removeCallbacks(it) }
-            countdownTimer?.let { handler.removeCallbacks(it) }
-            statusBar.text = "${item?.name ?: ""}  |  ⏸ 一時停止中"
-        } else {
-            // Resume auto-rotation
-            if (item != null) {
-                updateStatusBar(item)
-                val duration = (item.durationSeconds * 1000).toLong()
-                contentTimer = Runnable { advanceToNext() }.also {
-                    handler.postDelayed(it, duration)
-                }
+        // Stop auto-rotation
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+        statusBar.text = "${item?.name ?: ""}  |  ⏸ 一時停止中 (戻るで再開)"
+
+        // Enable WebView interaction
+        enableWebViewInteraction()
+    }
+
+    private fun resumePlayback() {
+        if (!isPlaying || !isPaused) return
+
+        isPaused = false
+        val item = scheduleManager.getCurrentItem()
+
+        // Disable WebView interaction
+        disableWebViewInteraction()
+
+        // Resume auto-rotation
+        if (item != null) {
+            updateStatusBar(item)
+            val duration = (item.durationSeconds * 1000).toLong()
+            contentTimer = Runnable { advanceToNext() }.also {
+                handler.postDelayed(it, duration)
             }
+        }
+    }
+
+    private fun enableWebViewInteraction() {
+        // Hide touch overlay so touches reach WebView
+        touchOverlay.visibility = View.GONE
+        // Enable WebView focus for DPAD navigation
+        activeWebView?.apply {
+            isFocusable = true
+            isFocusableInTouchMode = true
+            requestFocus()
+        }
+    }
+
+    private fun disableWebViewInteraction() {
+        // Show touch overlay to intercept gestures
+        touchOverlay.visibility = View.VISIBLE
+        // Disable WebView focus
+        activeWebView?.apply {
+            isFocusable = false
+            isFocusableInTouchMode = false
+            clearFocus()
         }
     }
 
@@ -302,7 +351,7 @@ class PlayerActivity : ComponentActivity() {
         containerLayout.addView(webViewB)
 
         // Transparent touch overlay for gesture detection (above WebViews)
-        val touchOverlay = View(this).apply {
+        touchOverlay = View(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -341,6 +390,12 @@ class PlayerActivity : ComponentActivity() {
             textSize = 14f
             setPadding(16, 8, 16, 8)
             visibility = View.VISIBLE
+            // Tap status bar to resume when paused (for touch users)
+            setOnClickListener {
+                if (isPaused) {
+                    resumePlayback()
+                }
+            }
         }
         containerLayout.addView(statusBar)
 
@@ -422,6 +477,7 @@ class PlayerActivity : ComponentActivity() {
         val item = scheduleManager.getCurrentItem() ?: return
         isPlaying = true
         isPaused = false
+        disableWebViewInteraction()
         loadContent(activeWebView!!, item)
         updateStatusBar(item)
 
@@ -698,7 +754,7 @@ class PlayerActivity : ComponentActivity() {
                 val item = scheduleManager.getCurrentItem()
                 if (item != null) {
                     if (isPaused) {
-                        statusBar.text = "${item.name} ($current/$total)  |  ⏸ 一時停止中"
+                        statusBar.text = "${item.name} ($current/$total)  |  ⏸ 一時停止中 (戻るで再開)"
                     } else {
                         statusBar.text = "${item.name} ($current/$total)  |  次の切替まで: ${remainingSeconds}秒"
                     }
