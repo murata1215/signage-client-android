@@ -189,27 +189,63 @@ class PlayerActivity : ComponentActivity() {
 
     private fun goToPrevious() {
         if (!isPlaying) return
-        if (isPaused) {
-            // If paused, just go back without resuming auto-rotation
-            scheduleManager.goToPrevious()
-            val item = scheduleManager.getCurrentItem() ?: return
-            loadContent(activeWebView!!, item)
+
+        // Cancel current timers
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+
+        // Preload previous content into standby, then swap
+        val prevItem = scheduleManager.getPreviousItem() ?: return
+        standbyReady = false
+        preloadContent(standbyWebView!!, prevItem)
+
+        // Wait for preload and then swap
+        val wasPaused = isPaused
+        handler.post(object : Runnable {
+            override fun run() {
+                if (!standbyReady) {
+                    handler.postDelayed(this, 200)
+                    return
+                }
+                doPreviousSwap(wasPaused)
+            }
+        })
+    }
+
+    private fun doPreviousSwap(wasPaused: Boolean) {
+        // Swap WebViews with crossfade
+        val temp = activeWebView
+        activeWebView = standbyWebView
+        standbyWebView = temp
+
+        activeWebView?.apply {
+            alpha = 0f
+            visibility = View.VISIBLE
+            animate().alpha(1f).setDuration(800).start()
+        }
+        standbyWebView?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+            standbyWebView?.visibility = View.INVISIBLE
+        }?.start()
+
+        // Move schedule index to previous
+        scheduleManager.goToPrevious()
+        val item = scheduleManager.getCurrentItem() ?: return
+
+        if (wasPaused) {
             statusBar.text = "${item.name}  |  ⏸ 一時停止中"
         } else {
-            // Cancel current timer, go to previous, restart timer
-            contentTimer?.let { handler.removeCallbacks(it) }
-            countdownTimer?.let { handler.removeCallbacks(it) }
-
-            scheduleManager.goToPrevious()
-            val item = scheduleManager.getCurrentItem() ?: return
-            loadContent(activeWebView!!, item)
             updateStatusBar(item)
-
             // Schedule next auto-advance
             val duration = (item.durationSeconds * 1000).toLong()
             contentTimer = Runnable { advanceToNext() }.also {
                 handler.postDelayed(it, duration)
             }
+        }
+
+        // Preload next content into new standby
+        standbyReady = false
+        scheduleManager.getNextItem()?.let { nextItem ->
+            preloadContent(standbyWebView!!, nextItem)
         }
     }
 

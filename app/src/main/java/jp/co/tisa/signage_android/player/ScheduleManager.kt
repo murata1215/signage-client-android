@@ -96,6 +96,13 @@ class ScheduleManager(
         return items[nextIndex]
     }
 
+    fun getPreviousItem(): PlaylistItem? {
+        val items = playlist
+        if (items.isEmpty()) return null
+        val prevIndex = if (currentIndex - 1 < 0) items.size - 1 else currentIndex - 1
+        return items[prevIndex]
+    }
+
     fun reset() {
         currentIndex = 0
     }
