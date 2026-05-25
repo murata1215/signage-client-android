@@ -146,8 +146,14 @@ class PlayerActivity : ComponentActivity() {
     // Key Events (Remote Control)
     // =========================================================================
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        // When paused (interactive mode), only handle BACK to resume
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        val keyCode = event.keyCode
+
+        // When paused (interactive mode), only intercept BACK to resume
         // All other keys pass through to WebView for interaction
         if (isPaused) {
             return when (keyCode) {
@@ -155,11 +161,11 @@ class PlayerActivity : ComponentActivity() {
                     resumePlayback()
                     true
                 }
-                else -> super.onKeyDown(keyCode, event)
+                else -> super.dispatchKeyEvent(event)
             }
         }
 
-        // Normal mode: intercept all navigation keys
+        // Normal mode: intercept navigation keys before they reach WebView
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_MEDIA_NEXT,
@@ -183,7 +189,7 @@ class PlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 true // Consume to prevent WebView from scrolling/focusing
             }
-            else -> super.onKeyDown(keyCode, event)
+            else -> super.dispatchKeyEvent(event)
         }
     }
 
