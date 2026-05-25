@@ -26,7 +26,7 @@ class SignageService : Service() {
         const val CHANNEL_ID = "signage_service_channel"
         const val NOTIFICATION_ID = 1
         private const val TAG = "SignageService"
-        private const val UPDATE_CHECK_INTERVAL_MS = 3600_000L // 1 hour
+        private const val UPDATE_CHECK_INTERVAL_MS = 300_000L // 5 minutes
     }
 
     override fun onCreate() {
