@@ -22,6 +22,8 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import jp.co.tisa.signage_android.data.ConfigManager
 import jp.co.tisa.signage_android.data.PlaylistItem
@@ -42,6 +44,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var webViewB: WebView
     private lateinit var statusBar: TextView
     private lateinit var touchOverlay: View
+    private lateinit var pauseBorder: View
 
     private var activeWebView: WebView? = null
     private var standbyWebView: WebView? = null
@@ -302,6 +305,8 @@ class PlayerActivity : ComponentActivity() {
     private fun enableWebViewInteraction() {
         // Hide touch overlay so touches reach WebView
         touchOverlay.visibility = View.GONE
+        // Show red border to indicate pause mode
+        pauseBorder.visibility = View.VISIBLE
         // Enable WebView focus for DPAD navigation
         activeWebView?.apply {
             isFocusable = true
@@ -313,6 +318,8 @@ class PlayerActivity : ComponentActivity() {
     private fun disableWebViewInteraction() {
         // Show touch overlay to intercept gestures
         touchOverlay.visibility = View.VISIBLE
+        // Hide red border
+        pauseBorder.visibility = View.GONE
         // Disable WebView focus
         activeWebView?.apply {
             isFocusable = false
@@ -376,6 +383,22 @@ class PlayerActivity : ComponentActivity() {
             }
         }
         containerLayout.addView(touchOverlay)
+
+        // Pause indicator: red border around the screen
+        pauseBorder = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(8, Color.RED)
+            }
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+        }
+        containerLayout.addView(pauseBorder)
 
         // Status bar overlay
         statusBar = TextView(this).apply {
