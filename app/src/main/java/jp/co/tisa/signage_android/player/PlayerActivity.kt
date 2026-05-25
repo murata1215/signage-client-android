@@ -52,7 +52,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
-    private var isDebugVisible = false
+    private var isDebugVisible = true
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -507,7 +507,7 @@ class PlayerActivity : ComponentActivity() {
             text = "[UPDATE] 待機中..."
             isClickable = false
             isFocusable = false
-            visibility = View.GONE
+            visibility = View.VISIBLE
         }
         containerLayout.addView(debugTextView)
 
