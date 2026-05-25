@@ -9,7 +9,7 @@ Linux版 (Electron) の Android 移植版。
 - **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
 - **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング
-- **A/Bクロスフェード切替** - WebView 2枚で背面先読み + 800msフェードアニメーション
+- **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
 - **スケジュールポーリング** - version ベースの差分検知、コンテンツ切替時にも更新チェック
 - **ハートビート送信** - Foreground Service で定期送信 (管理画面の稼働監視用)
 - **リモコン操作** - DPAD左右で前後移動、決定で一時停止/再開
@@ -20,6 +20,9 @@ Linux版 (Electron) の Android 移植版。
 - **キオスクモード** - フルスクリーン、画面常時ON、Boot時自動起動
 - **プロキシ対応** - OkHttp で社内プロキシ経由、ローカルIPバイパス
 - **ステータスバー** - コンテンツ名 + カウントダウン表示
+- **一時停止モード** - WebView操作可能 (リモコンでリンク選択・クリック)、枠色で状態表示
+- **自動アップデート** - サーバーからAPKを取得し PackageInstaller Session でOTA更新
+- **デバッグオーバーレイ** - 画面右上にアップデートチェックログをリアルタイム表示
 
 ## 動作環境
 
@@ -33,7 +36,8 @@ Linux版 (Electron) の Android 移植版。
 |--------------|------|
 | 言語 | Kotlin |
 | UI (セットアップ) | Jetpack Compose + Material3 |
-| UI (コンテンツ表示) | WebView x2 (A/B交互切替) |
+| UI (コンテンツ表示) | WebView x3 (active+next+prev交互切替) |
+| 自動アップデート | PackageInstaller Session API |
 | PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 |
 | HTTP通信 | OkHttp 4.x (プロキシ対応) |
 | JSON | Gson |
@@ -62,7 +66,9 @@ jp.co.tisa.signage_android/
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
 │   └── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
 ├── service/
-│   ├── SignageService.kt     # Foreground Service (ハートビート送信)
+│   ├── SignageService.kt     # Foreground Service (ハートビート + アップデートチェック)
+│   ├── AppUpdateManager.kt   # OTA自動アップデート (PackageInstaller Session)
+│   ├── InstallResultReceiver.kt # インストール結果受信
 │   └── BootReceiver.kt      # BOOT_COMPLETED 自動起動
 └── ui/
     ├── SetupScreen.kt        # 設定画面 (Compose、初回設定/設定変更/初期化)
@@ -96,6 +102,8 @@ jp.co.tisa.signage_android/
 | GET | `/api/player/schedule?key={client_key}` | スケジュール取得 |
 | POST | `/api/player/heartbeat?key={client_key}` | ハートビート送信 |
 | GET | `/api/player/content/:id/file?key={client_key}` | PDFダウンロード |
+| GET | `/api/player/update/check?key={client_key}` | アップデートチェック |
+| GET | `/api/player/update/download?key={client_key}` | APKダウンロード |
 
 ## 起動フロー
 
@@ -116,6 +124,20 @@ jp.co.tisa.signage_android/
     ├── URL/Key変更 → 接続テスト → 保存して開始 → 新設定でPlayer再開
     ├── 戻る → 変更せずPlayerに戻る
     └── 設定を初期化 → 確認ダイアログ → OK → フィールド空に
+```
+
+## 自動アップデート
+
+```
+SignageService (1分間隔)
+  -> GET /api/player/update/check?key=...
+  -> サーバー versionCode > アプリ versionCode ?
+    -> YES: APKダウンロード -> PackageInstaller Session でインストール
+    -> NO: 何もしない
+
+release/
+├── signage-android-debug.apk    # 最新APK
+└── version.json                  # バージョン情報 (サーバーに配置)
 ```
 
 ## プロキシ設定

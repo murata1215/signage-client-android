@@ -10,9 +10,10 @@ Android版サイネージクライアント。サーバー(signage-server)から
 ```
 
 ## Architecture
-- **WebViewベース**: コンテンツ表示はWebView x2 (A/B交互フェード切替、背面先読み)
+- **WebViewベース**: コンテンツ表示はWebView x3 (active+next+prev 3枚ローテーション切替)
 - **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避)
-- **先読み**: standbyWebViewにコンテンツを事前ロード、完了後にフェード切替(ちらつき防止)
+- **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
+- **自動アップデート**: PackageInstaller Session APIでOTA更新 (1分間隔チェック)
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
 - **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
@@ -31,7 +32,9 @@ jp.co.tisa.signage_android/
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
 │   └── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
 ├── service/
-│   ├── SignageService.kt     # Foreground Service(ハートビート送信)
+│   ├── SignageService.kt     # Foreground Service(ハートビート + アップデートチェック)
+│   ├── AppUpdateManager.kt   # OTA自動アップデート(PackageInstaller Session)
+│   ├── InstallResultReceiver.kt # インストール結果受信
 │   └── BootReceiver.kt      # BOOT_COMPLETED自動起動
 └── ui/
     ├── SetupScreen.kt        # 初回設定画面(Compose)
@@ -42,6 +45,8 @@ jp.co.tisa.signage_android/
 - GET `/api/player/schedule?key={client_key}` - スケジュール取得
 - POST `/api/player/heartbeat?key={client_key}` - ハートビート
 - GET `/api/player/content/:id/file?key={client_key}` - PDFダウンロード
+- GET `/api/player/update/check?key={client_key}` - アップデートチェック
+- GET `/api/player/update/download?key={client_key}` - APKダウンロード
 
 ## Key Design Decisions
 - minSdk = 24, targetSdk = 36
@@ -50,5 +55,7 @@ jp.co.tisa.signage_android/
 - Gson for JSON serialization
 - Foreground Service for heartbeat (Android制約対応)
 - PDF表示はBase64注入方式 (file://間のCORS制約回避)
-- WebView A/B先読み+standbyReadyフラグでちらつき防止
+- WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
+- PackageInstaller Session APIでサイレント自動アップデート(フォールバック: Intent方式)
+- dispatchKeyEvent でリモコンキーをView階層より先に捕捉
 - setInitialScale(100) + loadWithOverviewMode=false でズーム固定
