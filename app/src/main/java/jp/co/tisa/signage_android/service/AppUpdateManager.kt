@@ -1,15 +1,15 @@
 package jp.co.tisa.signage_android.service
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.util.Log
-import androidx.core.content.FileProvider
 import jp.co.tisa.signage_android.data.ServerClient
-import jp.co.tisa.signage_android.data.UpdateInfo
 import java.io.File
+import java.io.FileInputStream
 
 class AppUpdateManager(
     private val context: Context,
@@ -19,6 +19,7 @@ class AppUpdateManager(
     companion object {
         private const val TAG = "AppUpdateManager"
         private const val APK_FILENAME = "signage-update.apk"
+        const val ACTION_INSTALL_RESULT = "jp.co.tisa.signage_android.INSTALL_RESULT"
     }
 
     private val apkDir: File = File(context.filesDir, "updates").apply {
@@ -77,31 +78,85 @@ class AppUpdateManager(
         }
 
         val sizeMb = apkFile.length() / (1024 * 1024)
-        onLog("ダウンロード完了 (${sizeMb}MB) インストーラー起動")
+        onLog("ダウンロード完了 (${sizeMb}MB)")
 
-        triggerInstall()
+        triggerInstallViaSession()
         return true
     }
 
-    private fun triggerInstall() {
+    /**
+     * Install APK via PackageInstaller Session API.
+     * On Android 12+, self-update (same package name, same signer) can be silent.
+     */
+    private fun triggerInstallViaSession() {
         try {
-            val apkUri: Uri = FileProvider.getUriForFile(
+            val packageInstaller = context.packageManager.packageInstaller
+
+            val params = PackageInstaller.SessionParams(
+                PackageInstaller.SessionParams.MODE_FULL_INSTALL
+            ).apply {
+                setAppPackageName(context.packageName)
+            }
+
+            val sessionId = packageInstaller.createSession(params)
+            onLog("Session作成: $sessionId")
+
+            val session = packageInstaller.openSession(sessionId)
+
+            // Write APK data to session
+            session.openWrite("signage-update", 0, apkFile.length()).use { outputStream ->
+                FileInputStream(apkFile).use { inputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+                session.fsync(outputStream)
+            }
+
+            onLog("APK書込完了 → commit中...")
+
+            // Create intent for install result
+            val intent = Intent(ACTION_INSTALL_RESULT).apply {
+                setPackage(context.packageName)
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                context,
+                sessionId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            )
+
+            // Commit the session (triggers install)
+            session.commit(pendingIntent.intentSender)
+            onLog("commit完了 → インストール中...")
+
+        } catch (e: Exception) {
+            onLog("Session失敗: ${e.message}")
+            Log.e(TAG, "PackageInstaller session failed", e)
+            // Fallback to traditional intent install
+            onLog("フォールバック: Intent方式で再試行")
+            triggerInstallViaIntent()
+        }
+    }
+
+    /**
+     * Fallback: traditional ACTION_VIEW intent install (shows confirmation dialog)
+     */
+    private fun triggerInstallViaIntent() {
+        try {
+            val apkUri = androidx.core.content.FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 apkFile
             )
-
             val installIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(apkUri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-
             context.startActivity(installIntent)
-            onLog("インストーラー起動完了")
+            onLog("Intent方式: インストーラー起動")
         } catch (e: Exception) {
-            onLog("インストール失敗: ${e.message}")
-            Log.e(TAG, "Failed to trigger install", e)
+            onLog("Intent方式も失敗: ${e.message}")
+            Log.e(TAG, "Fallback install also failed", e)
         }
     }
 
