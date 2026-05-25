@@ -42,12 +42,15 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var containerLayout: FrameLayout
     private lateinit var webViewA: WebView
     private lateinit var webViewB: WebView
+    private lateinit var webViewC: WebView
     private lateinit var statusBar: TextView
     private lateinit var touchOverlay: View
     private lateinit var pauseBorder: View
 
+    // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
-    private var standbyWebView: WebView? = null
+    private var nextWebView: WebView? = null
+    private var prevWebView: WebView? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -57,7 +60,8 @@ class PlayerActivity : ComponentActivity() {
     private var pollingJob: Job? = null
     private var isPlaying = false
     private var isPaused = false
-    private var standbyReady = false
+    private var nextReady = false
+    private var prevReady = false
 
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
@@ -119,10 +123,8 @@ class PlayerActivity : ComponentActivity() {
                     abs(velocityX) > SWIPE_VELOCITY_THRESHOLD
                 ) {
                     if (diffX > 0) {
-                        // Swipe right -> previous
                         goToPrevious()
                     } else {
-                        // Swipe left -> next
                         goToNext()
                     }
                     return true
@@ -136,7 +138,6 @@ class PlayerActivity : ComponentActivity() {
             }
 
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                // Single tap does nothing (avoids conflict with double tap)
                 return false
             }
         })
@@ -154,7 +155,6 @@ class PlayerActivity : ComponentActivity() {
         val keyCode = event.keyCode
 
         // When paused (interactive mode), only intercept BACK to resume
-        // All other keys pass through to WebView for interaction
         if (isPaused) {
             return when (keyCode) {
                 KeyEvent.KEYCODE_BACK -> {
@@ -200,7 +200,6 @@ class PlayerActivity : ComponentActivity() {
     private fun goToNext() {
         if (!isPlaying) return
         if (isPaused) {
-            // If paused, just advance without resuming auto-rotation
             scheduleManager.advanceToNext()
             val item = scheduleManager.getCurrentItem() ?: return
             loadContent(activeWebView!!, item)
@@ -212,65 +211,71 @@ class PlayerActivity : ComponentActivity() {
 
     private fun goToPrevious() {
         if (!isPlaying) return
+        if (isPaused) {
+            scheduleManager.goToPrevious()
+            val item = scheduleManager.getCurrentItem() ?: return
+            loadContent(activeWebView!!, item)
+            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
+        } else {
+            // Cancel current timers
+            contentTimer?.let { handler.removeCallbacks(it) }
+            countdownTimer?.let { handler.removeCallbacks(it) }
 
-        // Cancel current timers
-        contentTimer?.let { handler.removeCallbacks(it) }
-        countdownTimer?.let { handler.removeCallbacks(it) }
-
-        // Preload previous content into standby, then swap
-        val prevItem = scheduleManager.getPreviousItem() ?: return
-        standbyReady = false
-        preloadContent(standbyWebView!!, prevItem)
-
-        // Wait for preload and then swap
-        val wasPaused = isPaused
-        handler.post(object : Runnable {
-            override fun run() {
-                if (!standbyReady) {
-                    handler.postDelayed(this, 200)
-                    return
-                }
-                doPreviousSwap(wasPaused)
+            // If prev is ready, swap immediately; otherwise wait
+            if (prevReady) {
+                doPreviousSwap()
+            } else {
+                handler.post(object : Runnable {
+                    override fun run() {
+                        if (!prevReady) {
+                            handler.postDelayed(this, 200)
+                            return
+                        }
+                        doPreviousSwap()
+                    }
+                })
             }
-        })
+        }
     }
 
-    private fun doPreviousSwap(wasPaused: Boolean) {
-        // Swap WebViews with crossfade
-        val temp = activeWebView
-        activeWebView = standbyWebView
-        standbyWebView = temp
+    private fun doPreviousSwap() {
+        // Rotate: active→next, prev→active, next→prev
+        val oldActive = activeWebView
+        val oldNext = nextWebView
+        val oldPrev = prevWebView
 
+        activeWebView = oldPrev
+        nextWebView = oldActive  // Current content becomes "next" (one step forward)
+        prevWebView = oldNext    // Old next becomes prev (will be reloaded)
+
+        // Crossfade
         activeWebView?.apply {
             alpha = 0f
             visibility = View.VISIBLE
             animate().alpha(1f).setDuration(800).start()
         }
-        standbyWebView?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
-            standbyWebView?.visibility = View.INVISIBLE
+        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+            oldActive.visibility = View.INVISIBLE
         }?.start()
 
-        // Move schedule index to previous
+        // Move schedule index
         scheduleManager.goToPrevious()
         val item = scheduleManager.getCurrentItem() ?: return
+        updateStatusBar(item)
 
-        if (wasPaused) {
-            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
-            // Re-enable WebView interaction after swap
-            enableWebViewInteraction()
-        } else {
-            updateStatusBar(item)
-            // Schedule next auto-advance
-            val duration = (item.durationSeconds * 1000).toLong()
-            contentTimer = Runnable { advanceToNext() }.also {
-                handler.postDelayed(it, duration)
-            }
+        // nextReady is true (old active already had content)
+        nextReady = true
+
+        // Schedule next auto-advance
+        val duration = (item.durationSeconds * 1000).toLong()
+        contentTimer = Runnable { advanceToNext() }.also {
+            handler.postDelayed(it, duration)
         }
 
-        // Preload next content into new standby
-        standbyReady = false
-        scheduleManager.getNextItem()?.let { nextItem ->
-            preloadContent(standbyWebView!!, nextItem)
+        // Preload previous into the recycled WebView
+        prevReady = false
+        scheduleManager.getPreviousItem()?.let { prevItem ->
+            preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
         }
     }
 
@@ -280,12 +285,10 @@ class PlayerActivity : ComponentActivity() {
         isPaused = true
         val item = scheduleManager.getCurrentItem()
 
-        // Stop auto-rotation
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
         statusBar.text = "${item?.name ?: ""}  |  ⏸ 一時停止中 (戻るで再開)"
 
-        // Enable WebView interaction
         enableWebViewInteraction()
     }
 
@@ -295,10 +298,8 @@ class PlayerActivity : ComponentActivity() {
         isPaused = false
         val item = scheduleManager.getCurrentItem()
 
-        // Disable WebView interaction
         disableWebViewInteraction()
 
-        // Resume auto-rotation
         if (item != null) {
             updateStatusBar(item)
             val duration = (item.durationSeconds * 1000).toLong()
@@ -306,14 +307,14 @@ class PlayerActivity : ComponentActivity() {
                 handler.postDelayed(it, duration)
             }
         }
+
+        // Re-preload next and prev after pause (content may have changed)
+        preloadBothDirections()
     }
 
     private fun enableWebViewInteraction() {
-        // Hide touch overlay so touches reach WebView
         touchOverlay.visibility = View.GONE
-        // Show red border to indicate pause mode
         pauseBorder.visibility = View.VISIBLE
-        // Enable WebView focus for DPAD navigation
         activeWebView?.apply {
             isFocusable = true
             isFocusableInTouchMode = true
@@ -322,11 +323,8 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun disableWebViewInteraction() {
-        // Show touch overlay to intercept gestures
         touchOverlay.visibility = View.VISIBLE
-        // Hide red border
         pauseBorder.visibility = View.GONE
-        // Disable WebView focus
         activeWebView?.apply {
             isFocusable = false
             isFocusableInTouchMode = false
@@ -359,11 +357,13 @@ class PlayerActivity : ComponentActivity() {
 
         webViewA = createWebView()
         webViewB = createWebView()
+        webViewC = createWebView()
 
         containerLayout.addView(webViewA)
         containerLayout.addView(webViewB)
+        containerLayout.addView(webViewC)
 
-        // Transparent touch overlay for gesture detection (above WebViews)
+        // Transparent touch overlay for gesture detection
         touchOverlay = View(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -371,7 +371,6 @@ class PlayerActivity : ComponentActivity() {
             )
             setOnTouchListener { _, event ->
                 gestureDetector.onTouchEvent(event)
-                // 5-second long press to reset to setup screen
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
                         longPressResetRunnable?.let { handler.removeCallbacks(it) }
@@ -381,16 +380,13 @@ class PlayerActivity : ComponentActivity() {
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         longPressResetRunnable?.let { handler.removeCallbacks(it) }
                     }
-                    MotionEvent.ACTION_MOVE -> {
-                        // Cancel if finger moves too much (not a hold)
-                    }
                 }
-                true // Always consume to receive full gesture sequence
+                true
             }
         }
         containerLayout.addView(touchOverlay)
 
-        // Pause indicator: red border around the screen
+        // Pause indicator: red border
         pauseBorder = View(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -419,11 +415,8 @@ class PlayerActivity : ComponentActivity() {
             textSize = 14f
             setPadding(16, 8, 16, 8)
             visibility = View.VISIBLE
-            // Tap status bar to resume when paused (for touch users)
             setOnClickListener {
-                if (isPaused) {
-                    resumePlayback()
-                }
+                if (isPaused) resumePlayback()
             }
         }
         containerLayout.addView(statusBar)
@@ -431,8 +424,10 @@ class PlayerActivity : ComponentActivity() {
         setContentView(containerLayout)
 
         activeWebView = webViewA
-        standbyWebView = webViewB
+        nextWebView = webViewB
+        prevWebView = webViewC
         webViewB.visibility = View.INVISIBLE
+        webViewC.visibility = View.INVISIBLE
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -454,7 +449,6 @@ class PlayerActivity : ComponentActivity() {
                 displayZoomControls = false
                 setSupportZoom(false)
                 textZoom = 100
-                // Set Chrome-like User-Agent to avoid bot detection
                 userAgentString = settings.userAgentString.replace(
                     Regex("\\bwv\\b"), ""
                 ) + " Chrome/120.0.0.0"
@@ -474,31 +468,23 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
 
     private suspend fun startPlayback() {
-        // Load schedule
         val schedule = scheduleManager.loadSchedule()
         if (schedule == null) {
             showStandby()
             return
         }
 
-        // Download PDFs
         pdfCacheManager.downloadAll(schedule.playlist)
-
-        // Cleanup unused cache
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
         pdfCacheManager.cleanupUnused(activeIds)
 
-        // Check play time
         if (!scheduleManager.isWithinPlayTime()) {
             showStandby()
             startTimeCheck()
             return
         }
 
-        // Start content rotation
         playCurrentContent()
-
-        // Start background polling
         startPolling()
     }
 
@@ -519,27 +505,32 @@ class PlayerActivity : ComponentActivity() {
             handler.postDelayed(it, duration)
         }
 
-        // Preload next content into standby WebView
-        standbyReady = false
+        // Preload both next and previous
+        preloadBothDirections()
+    }
+
+    private fun preloadBothDirections() {
+        nextReady = false
+        prevReady = false
         scheduleManager.getNextItem()?.let { nextItem ->
-            preloadContent(standbyWebView!!, nextItem)
+            preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
+        }
+        scheduleManager.getPreviousItem()?.let { prevItem ->
+            preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
         }
     }
 
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
 
-        // Check for schedule update at content switch time
         coroutineScope.launch {
             val updated = scheduleManager.checkForUpdate()
             if (updated) {
-                // Download new PDFs if schedule changed
                 val items = scheduleManager.playlist
                 pdfCacheManager.downloadAll(items)
                 val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
                 pdfCacheManager.cleanupUnused(activeIds)
             }
-            // Perform the actual content switch on main thread
             handler.post { doAdvance() }
         }
     }
@@ -547,30 +538,37 @@ class PlayerActivity : ComponentActivity() {
     private fun doAdvance() {
         if (!isPlaying || isPaused) return
 
-        // If standby is not ready yet, wait a bit and retry
-        if (!standbyReady) {
+        if (!nextReady) {
             handler.postDelayed({ doAdvance() }, 200)
             return
         }
 
-        // Swap WebViews with crossfade (standby already has preloaded content)
-        val temp = activeWebView
-        activeWebView = standbyWebView
-        standbyWebView = temp
+        // Rotate: active→prev, next→active, prev→next
+        val oldActive = activeWebView
+        val oldNext = nextWebView
+        val oldPrev = prevWebView
 
+        activeWebView = oldNext
+        prevWebView = oldActive  // Current content becomes "prev" (one step back)
+        nextWebView = oldPrev    // Old prev becomes next (will be reloaded)
+
+        // Crossfade
         activeWebView?.apply {
             alpha = 0f
             visibility = View.VISIBLE
             animate().alpha(1f).setDuration(800).start()
         }
-        standbyWebView?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
-            standbyWebView?.visibility = View.INVISIBLE
+        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+            oldActive.visibility = View.INVISIBLE
         }?.start()
 
-        // Advance schedule (standby had the next item preloaded)
+        // Advance schedule
         scheduleManager.advanceToNext()
         val item = scheduleManager.getCurrentItem() ?: return
         updateStatusBar(item)
+
+        // prevReady is true (old active already had content)
+        prevReady = true
 
         // Schedule next auto-advance
         contentTimer?.let { handler.removeCallbacks(it) }
@@ -581,23 +579,22 @@ class PlayerActivity : ComponentActivity() {
             handler.postDelayed(it, duration)
         }
 
-        // Preload the NEXT content into new standby WebView
-        standbyReady = false
+        // Preload next into recycled WebView
+        nextReady = false
         scheduleManager.getNextItem()?.let { nextItem ->
-            preloadContent(standbyWebView!!, nextItem)
+            preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
         }
     }
 
     private fun loadContent(webView: WebView, item: PlaylistItem) {
-        loadContentInternal(webView, item, isPreload = false)
+        loadContentInternal(webView, item, preloadType = null)
     }
 
-    private fun preloadContent(webView: WebView, item: PlaylistItem) {
-        loadContentInternal(webView, item, isPreload = true)
+    private fun preloadContent(webView: WebView, item: PlaylistItem, isPrevPreload: Boolean) {
+        loadContentInternal(webView, item, preloadType = if (isPrevPreload) "prev" else "next")
     }
 
-    private fun loadContentInternal(webView: WebView, item: PlaylistItem, isPreload: Boolean) {
-        // Reset zoom to prevent scale leaking between different contents
+    private fun loadContentInternal(webView: WebView, item: PlaylistItem, preloadType: String?) {
         webView.setInitialScale(100)
         when (item.type) {
             "pdf" -> {
@@ -607,7 +604,7 @@ class PlayerActivity : ComponentActivity() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         if (url?.contains("pdf-viewer.html") == true) {
-                            loadPdfIntoViewer(webView, cachedFile, item, duration, isPreload)
+                            loadPdfIntoViewer(webView, cachedFile, item, duration, preloadType)
                         }
                     }
                 }
@@ -617,9 +614,7 @@ class PlayerActivity : ComponentActivity() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        if (isPreload) {
-                            standbyReady = true
-                        }
+                        markPreloadReady(preloadType)
                     }
                 }
                 val url = item.url ?: return
@@ -628,13 +623,19 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun loadPdfIntoViewer(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int, isPreload: Boolean) {
+    private fun markPreloadReady(preloadType: String?) {
+        when (preloadType) {
+            "next" -> nextReady = true
+            "prev" -> prevReady = true
+        }
+    }
+
+    private fun loadPdfIntoViewer(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int, preloadType: String?) {
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val pdfBytes = if (cachedFile.exists()) {
                     cachedFile.readBytes()
                 } else {
-                    // Try to download on the fly
                     pdfCacheManager.downloadIfNeeded(item)
                     if (cachedFile.exists()) cachedFile.readBytes() else null
                 }
@@ -646,21 +647,17 @@ class PlayerActivity : ComponentActivity() {
                             "loadPdfBase64('$base64', $duration);",
                             null
                         )
-                        if (isPreload) {
-                            standbyReady = true
-                        }
+                        markPreloadReady(preloadType)
                     }
-                } else if (isPreload) {
+                } else {
                     withContext(Dispatchers.Main) {
-                        standbyReady = true // Don't block rotation even if PDF failed
+                        markPreloadReady(preloadType)
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                if (isPreload) {
-                    withContext(Dispatchers.Main) {
-                        standbyReady = true
-                    }
+                withContext(Dispatchers.Main) {
+                    markPreloadReady(preloadType)
                 }
             }
         }
@@ -679,7 +676,7 @@ class PlayerActivity : ComponentActivity() {
                         startPolling()
                     }
                 } else {
-                    handler.postDelayed(this, 60_000) // Check every minute
+                    handler.postDelayed(this, 60_000)
                 }
             }
         }, 60_000)
@@ -692,12 +689,10 @@ class PlayerActivity : ComponentActivity() {
                 delay((configManager.getPollingInterval() * 1000).toLong())
                 val updated = scheduleManager.checkForUpdate()
                 if (updated) {
-                    // Re-download PDFs for new schedule
                     val items = scheduleManager.playlist
                     pdfCacheManager.downloadAll(items)
                     val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
                     pdfCacheManager.cleanupUnused(activeIds)
-                    // Restart playback
                     playCurrentContent()
                 }
             }
@@ -735,16 +730,13 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
 
     private fun resetToSetup() {
-        // Stop playback
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
 
-        // Stop foreground service
         stopService(Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java))
 
-        // Launch MainActivity with settings flag (keep existing config)
         val intent = Intent(this, jp.co.tisa.signage_android.MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
             putExtra("show_settings", true)
@@ -767,6 +759,7 @@ class PlayerActivity : ComponentActivity() {
         coroutineScope.cancel()
         webViewA.destroy()
         webViewB.destroy()
+        webViewC.destroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
