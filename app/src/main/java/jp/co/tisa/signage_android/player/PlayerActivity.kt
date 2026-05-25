@@ -52,6 +52,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
+    private var isDebugVisible = false
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -132,6 +133,14 @@ class PlayerActivity : ComponentActivity() {
         debugTextView.text = debugLines.joinToString("\n")
     }
 
+    private fun toggleDebugOverlay() {
+        isDebugVisible = !isDebugVisible
+        debugTextView.visibility = if (isDebugVisible) View.VISIBLE else View.GONE
+        if (isDebugVisible) {
+            addDebugLog("[DEBUG] overlay ON")
+        }
+    }
+
     // =========================================================================
     // Gesture Detection (swipe left/right, double tap)
     // =========================================================================
@@ -186,6 +195,12 @@ class PlayerActivity : ComponentActivity() {
 
         val keyCode = event.keyCode
 
+        // Mute key toggles debug overlay (works in any mode)
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
+            toggleDebugOverlay()
+            return true
+        }
+
         // When paused (interactive mode), only intercept BACK to resume
         if (isPaused) {
             return when (keyCode) {
@@ -200,14 +215,22 @@ class PlayerActivity : ComponentActivity() {
         // Normal mode: intercept navigation keys before they reach WebView
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_RIGHT,
-            KeyEvent.KEYCODE_MEDIA_NEXT,
+            KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                goToNext()
+                true
+            }
             KeyEvent.KEYCODE_CHANNEL_UP -> {
+                addDebugLog("[KEY] CH▲ pressed")
                 goToNext()
                 true
             }
             KeyEvent.KEYCODE_DPAD_LEFT,
-            KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                goToPrevious()
+                true
+            }
             KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                addDebugLog("[KEY] CH▼ pressed")
                 goToPrevious()
                 true
             }
@@ -221,7 +244,18 @@ class PlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 true // Consume to prevent WebView from scrolling/focusing
             }
-            else -> super.dispatchKeyEvent(event)
+            // F1-F4 keys
+            KeyEvent.KEYCODE_F1 -> { addDebugLog("[KEY] F1 pressed"); true }
+            KeyEvent.KEYCODE_F2 -> { addDebugLog("[KEY] F2 pressed"); true }
+            KeyEvent.KEYCODE_F3 -> { addDebugLog("[KEY] F3 pressed"); true }
+            KeyEvent.KEYCODE_F4 -> { addDebugLog("[KEY] F4 pressed"); true }
+            // Volume keys
+            KeyEvent.KEYCODE_VOLUME_UP -> { addDebugLog("[KEY] VOL+ pressed"); true }
+            KeyEvent.KEYCODE_VOLUME_DOWN -> { addDebugLog("[KEY] VOL- pressed"); true }
+            else -> {
+                addDebugLog("[KEY] unknown keyCode=$keyCode (${KeyEvent.keyCodeToString(keyCode)})")
+                super.dispatchKeyEvent(event)
+            }
         }
     }
 
@@ -472,6 +506,7 @@ class PlayerActivity : ComponentActivity() {
             text = "[UPDATE] 待機中..."
             isClickable = false
             isFocusable = false
+            visibility = View.GONE
         }
         containerLayout.addView(debugTextView)
 
