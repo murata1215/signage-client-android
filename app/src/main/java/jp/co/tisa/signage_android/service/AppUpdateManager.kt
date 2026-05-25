@@ -68,7 +68,7 @@ class AppUpdateManager(
             return false
         }
 
-        onLog("更新あり! ダウンロード中...")
+        onLog("更新あり! DL: ${updateInfo.url.takeLast(40)}")
 
         val success = serverClient.downloadApk(updateInfo.url, apkFile)
         if (!success || !apkFile.exists()) {

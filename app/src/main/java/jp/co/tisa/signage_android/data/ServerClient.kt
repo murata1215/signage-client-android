@@ -10,6 +10,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.URI
 import java.util.concurrent.TimeUnit
 
 class ServerClient(private val config: SignageConfig) {
@@ -146,8 +147,16 @@ class ServerClient(private val config: SignageConfig) {
     suspend fun downloadApk(downloadPath: String, destFile: File): Boolean = withContext(Dispatchers.IO) {
         try {
             val url = if (downloadPath.startsWith("http")) {
+                // Absolute URL: use as-is
                 downloadPath
+            } else if (downloadPath.contains("key=")) {
+                // Server returned full path with key already included
+                // Use only host:port from serverUrl to avoid double path
+                val uri = URI(config.serverUrl)
+                val baseHost = "${uri.scheme}://${uri.host}${if (uri.port > 0) ":${uri.port}" else ""}"
+                "$baseHost$downloadPath"
             } else {
+                // Relative path: combine with serverUrl and add key
                 "${config.serverUrl}$downloadPath${if (downloadPath.contains("?")) "&" else "?"}key=${config.clientKey}"
             }
             val request = Request.Builder().url(url).get().build()

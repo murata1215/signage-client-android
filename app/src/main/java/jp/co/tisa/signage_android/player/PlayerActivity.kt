@@ -126,7 +126,7 @@ class PlayerActivity : ComponentActivity() {
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
         debugLines.add("[$time] $message")
-        if (debugLines.size > 5) {
+        if (debugLines.size > 10) {
             debugLines.removeAt(0)
         }
         debugTextView.text = debugLines.joinToString("\n")
@@ -454,19 +454,21 @@ class PlayerActivity : ComponentActivity() {
         containerLayout.addView(statusBar)
 
         // Debug overlay for update logs (top-right)
+        // Debug overlay: 1/4 screen, top-right
+        val displayMetrics = resources.displayMetrics
+        val quarterWidth = displayMetrics.widthPixels / 2
+        val quarterHeight = displayMetrics.heightPixels / 2
         debugTextView = TextView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                quarterWidth,
+                quarterHeight
             ).apply {
                 gravity = android.view.Gravity.TOP or android.view.Gravity.END
-                topMargin = 16
-                rightMargin = 16
             }
-            setBackgroundColor(0x99000000.toInt())
-            setTextColor(0xFFFFFF00.toInt()) // Yellow text
-            textSize = 10f
-            setPadding(12, 8, 12, 8)
+            setBackgroundColor(0xCC000000.toInt())
+            setTextColor(0xFF00FF00.toInt()) // Green text
+            textSize = 13f
+            setPadding(16, 12, 16, 12)
             text = "[UPDATE] 待機中..."
             isClickable = false
             isFocusable = false
