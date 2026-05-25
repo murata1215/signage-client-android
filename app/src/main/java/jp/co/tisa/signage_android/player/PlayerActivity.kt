@@ -426,7 +426,7 @@ class PlayerActivity : ComponentActivity() {
             )
             background = GradientDrawable().apply {
                 setColor(Color.TRANSPARENT)
-                setStroke(8, Color.BLUE)
+                setStroke(8, Color.GREEN)
             }
             visibility = View.GONE
             isClickable = false
