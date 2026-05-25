@@ -26,7 +26,9 @@ class SignageService : Service() {
         const val CHANNEL_ID = "signage_service_channel"
         const val NOTIFICATION_ID = 1
         private const val TAG = "SignageService"
-        private const val UPDATE_CHECK_INTERVAL_MS = 300_000L // 5 minutes
+        private const val UPDATE_CHECK_INTERVAL_MS = 60_000L // 1 minute
+        const val ACTION_UPDATE_LOG = "jp.co.tisa.signage_android.UPDATE_LOG"
+        const val EXTRA_LOG_MESSAGE = "log_message"
     }
 
     override fun onCreate() {
@@ -98,25 +100,34 @@ class SignageService : Service() {
         }
     }
 
+    private fun sendUpdateLog(message: String) {
+        Log.i(TAG, "[Update] $message")
+        val intent = Intent(ACTION_UPDATE_LOG).apply {
+            putExtra(EXTRA_LOG_MESSAGE, message)
+        }
+        sendBroadcast(intent)
+    }
+
     private fun startUpdateCheck() {
         updateCheckJob?.cancel()
         updateCheckJob = coroutineScope.launch {
             val configManager = ConfigManager(this@SignageService)
             val config = configManager.getConfig() ?: return@launch
             val client = ServerClient(config)
-            val updateManager = AppUpdateManager(this@SignageService, client)
+            val updateManager = AppUpdateManager(this@SignageService, client) { msg ->
+                sendUpdateLog(msg)
+            }
 
-            // Initial check after 30 seconds
-            delay(30_000)
+            sendUpdateLog("アップデート監視開始 (${UPDATE_CHECK_INTERVAL_MS / 1000}秒間隔)")
+
+            // Initial check after 10 seconds
+            delay(10_000)
 
             while (isActive) {
                 try {
-                    val updated = updateManager.checkAndUpdate()
-                    if (updated) {
-                        Log.i(TAG, "Update triggered, install dialog should appear")
-                    }
+                    updateManager.checkAndUpdate()
                 } catch (e: Exception) {
-                    Log.w(TAG, "Update check failed", e)
+                    sendUpdateLog("チェック失敗: ${e.message}")
                 }
                 delay(UPDATE_CHECK_INTERVAL_MS)
             }

@@ -13,7 +13,8 @@ import java.io.File
 
 class AppUpdateManager(
     private val context: Context,
-    private val serverClient: ServerClient
+    private val serverClient: ServerClient,
+    private val onLog: (String) -> Unit = {}
 ) {
     companion object {
         private const val TAG = "AppUpdateManager"
@@ -26,9 +27,6 @@ class AppUpdateManager(
 
     private val apkFile: File = File(apkDir, APK_FILENAME)
 
-    /**
-     * Get the current app's versionCode
-     */
     fun getCurrentVersionCode(): Int {
         return try {
             val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -52,48 +50,39 @@ class AppUpdateManager(
         }
     }
 
-    /**
-     * Check for updates and install if available.
-     * Returns true if an update was found and install was triggered.
-     */
     suspend fun checkAndUpdate(): Boolean {
-        Log.i(TAG, "Checking for updates...")
+        onLog("チェック開始...")
 
         val updateInfo = serverClient.checkForUpdate()
         if (updateInfo == null) {
-            Log.i(TAG, "No update info from server (API may not be implemented yet)")
+            onLog("サーバー応答なし (APIが未実装またはエラー)")
             return false
         }
 
         val currentVersion = getCurrentVersionCode()
-        Log.i(TAG, "Current versionCode: $currentVersion, Server versionCode: ${updateInfo.versionCode}")
+        onLog("現在v$currentVersion → サーバーv${updateInfo.versionCode} (${updateInfo.versionName})")
 
         if (updateInfo.versionCode <= currentVersion) {
-            Log.i(TAG, "Already up to date")
+            onLog("最新版です")
             cleanupApk()
             return false
         }
 
-        Log.i(TAG, "Update available: ${updateInfo.versionName} (${updateInfo.versionCode})")
+        onLog("更新あり! ダウンロード中...")
 
-        // Download APK
         val success = serverClient.downloadApk(updateInfo.url, apkFile)
         if (!success || !apkFile.exists()) {
-            Log.e(TAG, "Failed to download APK")
+            onLog("ダウンロード失敗")
             return false
         }
 
-        Log.i(TAG, "APK downloaded: ${apkFile.length()} bytes")
+        val sizeMb = apkFile.length() / (1024 * 1024)
+        onLog("ダウンロード完了 (${sizeMb}MB) インストーラー起動")
 
-        // Trigger install
         triggerInstall()
         return true
     }
 
-    /**
-     * Trigger APK installation via Intent.
-     * On non-Device Owner devices, this will show a confirmation dialog.
-     */
     private fun triggerInstall() {
         try {
             val apkUri: Uri = FileProvider.getUriForFile(
@@ -109,15 +98,13 @@ class AppUpdateManager(
             }
 
             context.startActivity(installIntent)
-            Log.i(TAG, "Install intent launched")
+            onLog("インストーラー起動完了")
         } catch (e: Exception) {
+            onLog("インストール失敗: ${e.message}")
             Log.e(TAG, "Failed to trigger install", e)
         }
     }
 
-    /**
-     * Clean up downloaded APK file
-     */
     private fun cleanupApk() {
         if (apkFile.exists()) {
             apkFile.delete()

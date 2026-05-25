@@ -1,7 +1,11 @@
 package jp.co.tisa.signage_android.player
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -46,6 +50,8 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var statusBar: TextView
     private lateinit var touchOverlay: View
     private lateinit var pauseBorder: View
+    private lateinit var debugTextView: TextView
+    private val debugLines = mutableListOf<String>()
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -68,6 +74,14 @@ class PlayerActivity : ComponentActivity() {
     private var longPressResetRunnable: Runnable? = null
 
     private lateinit var gestureDetector: GestureDetector
+
+    // BroadcastReceiver for update debug logs
+    private val updateLogReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val msg = intent?.getStringExtra(jp.co.tisa.signage_android.service.SignageService.EXTRA_LOG_MESSAGE) ?: return
+            addDebugLog(msg)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,10 +108,28 @@ class PlayerActivity : ComponentActivity() {
         scheduleManager = ScheduleManager(configManager, serverClient)
         pdfCacheManager = PdfCacheManager(this, serverClient)
 
+        // Register broadcast receiver for update logs
+        val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(updateLogReceiver, filter)
+        }
+
         // Start playback
         coroutineScope.launch {
             startPlayback()
         }
+    }
+
+    private fun addDebugLog(message: String) {
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        debugLines.add("[$time] $message")
+        if (debugLines.size > 5) {
+            debugLines.removeAt(0)
+        }
+        debugTextView.text = debugLines.joinToString("\n")
     }
 
     // =========================================================================
@@ -420,6 +452,26 @@ class PlayerActivity : ComponentActivity() {
             }
         }
         containerLayout.addView(statusBar)
+
+        // Debug overlay for update logs (top-right)
+        debugTextView = TextView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.END
+                topMargin = 16
+                rightMargin = 16
+            }
+            setBackgroundColor(0x99000000.toInt())
+            setTextColor(0xFFFFFF00.toInt()) // Yellow text
+            textSize = 10f
+            setPadding(12, 8, 12, 8)
+            text = "[UPDATE] 待機中..."
+            isClickable = false
+            isFocusable = false
+        }
+        containerLayout.addView(debugTextView)
 
         setContentView(containerLayout)
 
@@ -751,6 +803,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try { unregisterReceiver(updateLogReceiver) } catch (_: Exception) {}
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
