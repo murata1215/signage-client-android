@@ -29,3 +29,10 @@ data class PlaylistItem(
     @SerializedName("use_proxy") val useProxy: Boolean = false,
     @SerializedName("proxy_url") val proxyUrl: String? = null
 )
+
+data class UpdateInfo(
+    @SerializedName("version_code") val versionCode: Int,
+    @SerializedName("version_name") val versionName: String,
+    @SerializedName("url") val url: String,
+    @SerializedName("force") val force: Boolean = false
+)

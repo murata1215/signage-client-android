@@ -123,6 +123,52 @@ class ServerClient(private val config: SignageConfig) {
             ConnectionTestResult(false, "接続失敗: ${e.message}")
         }
     }
+
+    suspend fun checkForUpdate(): UpdateInfo? = withContext(Dispatchers.IO) {
+        try {
+            val url = buildPlayerUrl("/api/player/update/check")
+            val request = Request.Builder().url(url).get().build()
+            val response = getClient(url).newCall(request).execute()
+            response.use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: return@withContext null
+                    gson.fromJson(body, UpdateInfo::class.java)
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            // Update check failure is not critical
+            null
+        }
+    }
+
+    suspend fun downloadApk(downloadPath: String, destFile: File): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val url = if (downloadPath.startsWith("http")) {
+                downloadPath
+            } else {
+                "${config.serverUrl}$downloadPath${if (downloadPath.contains("?")) "&" else "?"}key=${config.clientKey}"
+            }
+            val request = Request.Builder().url(url).get().build()
+            val response = getClient(url).newCall(request).execute()
+            response.use { resp ->
+                if (resp.isSuccessful) {
+                    resp.body?.byteStream()?.use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
 }
 
 data class ConnectionTestResult(

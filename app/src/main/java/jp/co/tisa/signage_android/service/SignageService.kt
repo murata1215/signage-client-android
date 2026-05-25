@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import jp.co.tisa.signage_android.MainActivity
 import jp.co.tisa.signage_android.R
@@ -19,10 +20,13 @@ class SignageService : Service() {
 
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var heartbeatJob: Job? = null
+    private var updateCheckJob: Job? = null
 
     companion object {
         const val CHANNEL_ID = "signage_service_channel"
         const val NOTIFICATION_ID = 1
+        private const val TAG = "SignageService"
+        private const val UPDATE_CHECK_INTERVAL_MS = 3600_000L // 1 hour
     }
 
     override fun onCreate() {
@@ -35,6 +39,7 @@ class SignageService : Service() {
         startForeground(NOTIFICATION_ID, notification)
 
         startHeartbeat()
+        startUpdateCheck()
 
         return START_STICKY
     }
@@ -93,9 +98,35 @@ class SignageService : Service() {
         }
     }
 
+    private fun startUpdateCheck() {
+        updateCheckJob?.cancel()
+        updateCheckJob = coroutineScope.launch {
+            val configManager = ConfigManager(this@SignageService)
+            val config = configManager.getConfig() ?: return@launch
+            val client = ServerClient(config)
+            val updateManager = AppUpdateManager(this@SignageService, client)
+
+            // Initial check after 30 seconds
+            delay(30_000)
+
+            while (isActive) {
+                try {
+                    val updated = updateManager.checkAndUpdate()
+                    if (updated) {
+                        Log.i(TAG, "Update triggered, install dialog should appear")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Update check failed", e)
+                }
+                delay(UPDATE_CHECK_INTERVAL_MS)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         heartbeatJob?.cancel()
+        updateCheckJob?.cancel()
         coroutineScope.cancel()
     }
 }
