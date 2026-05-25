@@ -195,8 +195,8 @@ class PlayerActivity : ComponentActivity() {
 
         val keyCode = event.keyCode
 
-        // Mute key toggles debug overlay (works in any mode)
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
+        // F4 key toggles debug overlay (works in any mode)
+        if (keyCode == KeyEvent.KEYCODE_F4) {
             toggleDebugOverlay()
             return true
         }
@@ -248,8 +248,9 @@ class PlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_F1 -> { addDebugLog("[KEY] F1 pressed"); true }
             KeyEvent.KEYCODE_F2 -> { addDebugLog("[KEY] F2 pressed"); true }
             KeyEvent.KEYCODE_F3 -> { addDebugLog("[KEY] F3 pressed"); true }
-            KeyEvent.KEYCODE_F4 -> { addDebugLog("[KEY] F4 pressed"); true }
-            // Volume keys
+            // Note: F4 is handled above (debug overlay toggle)
+            // Volume/Mute keys (may be consumed by OS)
+            KeyEvent.KEYCODE_VOLUME_MUTE -> { addDebugLog("[KEY] MUTE pressed"); true }
             KeyEvent.KEYCODE_VOLUME_UP -> { addDebugLog("[KEY] VOL+ pressed"); true }
             KeyEvent.KEYCODE_VOLUME_DOWN -> { addDebugLog("[KEY] VOL- pressed"); true }
             else -> {
