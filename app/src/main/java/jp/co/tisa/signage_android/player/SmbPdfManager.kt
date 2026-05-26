@@ -104,14 +104,15 @@ class SmbPdfManager(private val context: Context) {
     // =====================================================================
 
     /**
-     * 指定したShareを同期し、PlaylistItemリストを返す。
+     * 指定したShareを同期し、PlaylistItemリストとダウンロード件数のPairを返す。
      * @param config Share設定
      * @param onProgress 進捗メッセージのコールバック（UIスレッドで呼ばれる想定）
+     * @return Pair(プレイリスト, ダウンロード件数)
      */
     suspend fun syncShare(
         config: SmbShareConfig,
         onProgress: suspend (String) -> Unit
-    ): List<PlaylistItem> {
+    ): Pair<List<PlaylistItem>, Int> {
         val shareHash = "${config.host}_${config.shareName}_${config.path}".hashCode()
             .let { if (it < 0) "n${-it}" else "$it" }
         val cacheDir = File(baseCacheDir, "share_$shareHash").apply {
@@ -205,7 +206,7 @@ class SmbPdfManager(private val context: Context) {
             }
 
             // Build playlist
-            return buildPlaylist(newEntries, cacheDir, config)
+            return Pair(buildPlaylist(newEntries, cacheDir, config), downloadCount)
 
         } catch (e: Exception) {
             e.printStackTrace()
@@ -215,9 +216,9 @@ class SmbPdfManager(private val context: Context) {
             val cachedEntries = loadMetadata(metadataFile)
             if (cachedEntries.isNotEmpty()) {
                 onProgress("キャッシュを使用: ${cachedEntries.size}件")
-                return buildPlaylist(cachedEntries, cacheDir, config)
+                return Pair(buildPlaylist(cachedEntries, cacheDir, config), 0)
             }
-            return emptyList()
+            return Pair(emptyList(), 0)
         }
     }
 

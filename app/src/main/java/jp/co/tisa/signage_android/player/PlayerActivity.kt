@@ -605,7 +605,7 @@ class PlayerActivity : ComponentActivity() {
                 if (url?.contains("sync-status.html") == true) {
                     // Start background sync
                     coroutineScope.launch {
-                        val playlist = withContext(Dispatchers.IO) {
+                        val (playlist, downloadCount) = withContext(Dispatchers.IO) {
                             manager.syncShare(config) { progressMsg ->
                                 withContext(Dispatchers.Main) {
                                     // Update sync screen
@@ -633,18 +633,24 @@ class PlayerActivity : ComponentActivity() {
                                 return@withContext
                             }
 
-                            // Show completion message
-                            val completeMsg = "同期完了: ${playlist.size}件のPDF (${config.displayMode})"
-                            activeWebView?.evaluateJavascript(
-                                "showComplete('$completeMsg');", null
-                            )
-                            addDebugLog("[SMB] 同期完了: ${config.path} - ${playlist.size}件")
+                            if (downloadCount > 0) {
+                                // ダウンロードありの場合: 完了画面を10秒表示してから再生
+                                val completeMsg = "同期完了: ${downloadCount}件ダウンロード (全${playlist.size}件)"
+                                activeWebView?.evaluateJavascript(
+                                    "showComplete('$completeMsg');", null
+                                )
+                                addDebugLog("[SMB] 同期完了: ${config.path} - ${downloadCount}件DL / 全${playlist.size}件")
 
-                            // 10秒間完了画面を表示してから再生開始
-                            handler.postDelayed({
+                                handler.postDelayed({
+                                    scheduleManager.setLocalPlaylist(playlist)
+                                    playCurrentContent()
+                                }, 10_000L)
+                            } else {
+                                // ダウンロードなし(更新なし): すぐに再生開始
+                                addDebugLog("[SMB] ${config.path} - ${playlist.size}件 (更新なし)")
                                 scheduleManager.setLocalPlaylist(playlist)
                                 playCurrentContent()
-                            }, 10_000L)
+                            }
                         }
                     }
                 }
