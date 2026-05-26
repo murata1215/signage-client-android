@@ -21,8 +21,9 @@ Linux版 (Electron) の Android 移植版。
 - **プロキシ対応** - OkHttp で社内プロキシ経由、ローカルIPバイパス
 - **ステータスバー** - コンテンツ名 + カウントダウン表示
 - **一時停止モード** - WebView操作可能 (リモコンでリンク選択・クリック)、枠色で状態表示
-- **自動アップデート** - サーバーからAPKを取得し PackageInstaller Session でOTA更新
-- **デバッグオーバーレイ** - 画面右上にアップデートチェックログをリアルタイム表示
+- **自動アップデート** - サーバーからAPKを取得しIntent方式でOTA更新 (確認画面→完了後「開く」ボタン)
+- **デバッグオーバーレイ** - 画面右上にキー押下・アップデートログをリアルタイム表示 (KEYCODE 93でON/OFF)
+- **リモコンキーログ** - F1-F4, VOL+/-, CH上下, 未知のキーをデバッグウインドウに記録
 
 ## 動作環境
 
@@ -37,7 +38,7 @@ Linux版 (Electron) の Android 移植版。
 | 言語 | Kotlin |
 | UI (セットアップ) | Jetpack Compose + Material3 |
 | UI (コンテンツ表示) | WebView x3 (active+next+prev交互切替) |
-| 自動アップデート | PackageInstaller Session API |
+| 自動アップデート | ACTION_VIEW Intent方式 (Session APIはフォールバック用に残存) |
 | PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 |
 | HTTP通信 | OkHttp 4.x (プロキシ対応) |
 | JSON | Gson |
@@ -85,6 +86,8 @@ jp.co.tisa.signage_android/
 | 左 / CH- | 前のコンテンツ |
 | 決定 / ENTER | 一時停止/再開 |
 | 上 / 下 | 無効 (WebView操作を防止) |
+| KEYCODE 93 | デバッグオーバーレイ ON/OFF |
+| F1-F4, VOL+/- | デバッグログに記録 |
 
 ### タッチ操作 (スマホ等)
 
@@ -132,7 +135,7 @@ jp.co.tisa.signage_android/
 SignageService (1分間隔)
   -> GET /api/player/update/check?key=...
   -> サーバー versionCode > アプリ versionCode ?
-    -> YES: APKダウンロード -> PackageInstaller Session でインストール
+    -> YES: APKダウンロード -> Intent方式でインストール (確認画面→完了後「開く」)
     -> NO: 何もしない
 
 release/

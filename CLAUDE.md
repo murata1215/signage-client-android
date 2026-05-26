@@ -13,10 +13,11 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **WebViewベース**: コンテンツ表示はWebView x3 (active+next+prev 3枚ローテーション切替)
 - **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避)
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
-- **自動アップデート**: PackageInstaller Session APIでOTA更新 (1分間隔チェック)
+- **自動アップデート**: ACTION_VIEW Intent方式でOTA更新 (1分間隔チェック、白い画面で確認→完了後「開く」ボタン)
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
 - **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
+- **デバッグオーバーレイ**: 画面右上に緑文字でキー押下・アップデートログ表示 (KEYCODE 93でON/OFF)
 - **ターゲット端末**: DS-ASTBX5 (Android STB)
 
 ## Package Structure
@@ -56,6 +57,7 @@ jp.co.tisa.signage_android/
 - Foreground Service for heartbeat (Android制約対応)
 - PDF表示はBase64注入方式 (file://間のCORS制約回避)
 - WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
-- PackageInstaller Session APIでサイレント自動アップデート(フォールバック: Intent方式)
+- ACTION_VIEW Intent方式でOTA更新(白い確認画面→完了後「開く」ボタン。Session APIはコード残存だが未使用)
+- DS-STBRC03リモコンのキーマッピング: F1-F4はKEYCODE_F1-F4ではなく端末固有コード(F4=KEYCODE_TV_INPUT=178等)
 - dispatchKeyEvent でリモコンキーをView階層より先に捕捉
 - setInitialScale(100) + loadWithOverviewMode=false でズーム固定
