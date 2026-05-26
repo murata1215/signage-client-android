@@ -704,11 +704,28 @@ class PlayerActivity : ComponentActivity() {
 
         // Schedule next content
         contentTimer?.let { handler.removeCallbacks(it) }
-        val duration = (item.durationSeconds * 1000).toLong()
-        contentTimer = Runnable {
-            advanceToNext()
-        }.also {
-            handler.postDelayed(it, duration)
+
+        // allPagesモード (pdfPageDuration != null) の場合:
+        // ページ送りはpdf-viewer.htmlのsetTimeoutチェーンが管理し、
+        // 全ページ完了時にonAllPagesCompleted()で通知される。
+        // contentTimerは安全弁として非常に長い値をセット。
+        val isAllPagesMode = SMB_TEST_MODE && item.pdfPageDuration != null
+        if (isAllPagesMode) {
+            // 安全弁: 万が一onAllPagesCompletedが来なかった場合のフォールバック
+            val safetyDuration = ((item.durationSeconds + 30) * 1000).toLong()
+            contentTimer = Runnable {
+                addDebugLog("[SMB] 安全弁タイマー発火 (通常はonAllPagesCompletedで切替)")
+                advanceToNext()
+            }.also {
+                handler.postDelayed(it, safetyDuration)
+            }
+        } else {
+            val duration = (item.durationSeconds * 1000).toLong()
+            contentTimer = Runnable {
+                advanceToNext()
+            }.also {
+                handler.postDelayed(it, duration)
+            }
         }
 
         // Preload both next and previous
@@ -1036,6 +1053,20 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPdfViewerReady() {
             // PDF viewer is ready to receive data
+        }
+
+        @JavascriptInterface
+        fun onAllPagesCompleted() {
+            handler.post {
+                // Only respond from the active WebView
+                if (webView != activeWebView) return@post
+
+                addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
+                // Cancel the safety timer and advance
+                contentTimer?.let { handler.removeCallbacks(it) }
+                countdownTimer?.let { handler.removeCallbacks(it) }
+                advanceToNext()
+            }
         }
     }
 }

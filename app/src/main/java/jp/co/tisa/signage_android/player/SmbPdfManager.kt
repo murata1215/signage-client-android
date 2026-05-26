@@ -339,8 +339,10 @@ class SmbPdfManager(private val context: Context) {
             displayModeMap[contentId] = config.displayMode
             localFileMap[contentId] = localFile
 
+            // allPagesモードでは、実際のページ送りはpdf-viewer.htmlが管理し
+            // onAllPagesCompleted()で完了通知する。durationSecondsは安全弁用。
             val durationSeconds = if (config.displayMode == "allPages") {
-                entry.pageCount * config.durationSeconds
+                (entry.pageCount + 1) * config.durationSeconds
             } else {
                 config.durationSeconds
             }

@@ -133,7 +133,15 @@
 
         function scheduleNextPage() {
             pageTimer = setTimeout(async () => {
-                currentPage = (currentPage % totalPages) + 1;
+                if (currentPage >= totalPages) {
+                    // All pages shown — notify Android and stop
+                    stopPageTimer();
+                    if (window.SignageInterface) {
+                        window.SignageInterface.onAllPagesCompleted();
+                    }
+                    return;
+                }
+                currentPage = currentPage + 1;
                 await renderPage(currentPage);
                 // Schedule next only after render is fully done
                 if (pageTimer !== null) {
