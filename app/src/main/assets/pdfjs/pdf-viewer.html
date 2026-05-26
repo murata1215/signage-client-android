@@ -69,33 +69,48 @@
             }
         }
 
+        let isRendering = false;
+
         async function renderPage(pageNum) {
-            if (!pdfDoc) return;
-            const page = await pdfDoc.getPage(pageNum);
+            if (!pdfDoc || isRendering) return;
+            isRendering = true;
+            try {
+                const page = await pdfDoc.getPage(pageNum);
 
-            const containerWidth = window.innerWidth;
-            const containerHeight = window.innerHeight;
-            const viewport = page.getViewport({ scale: 1 });
+                const containerWidth = window.innerWidth;
+                const containerHeight = window.innerHeight;
+                const viewport = page.getViewport({ scale: 1 });
 
-            const scaleX = containerWidth / viewport.width;
-            const scaleY = containerHeight / viewport.height;
-            const scale = Math.min(scaleX, scaleY);
+                const scaleX = containerWidth / viewport.width;
+                const scaleY = containerHeight / viewport.height;
+                const scale = Math.min(scaleX, scaleY);
 
-            const scaledViewport = page.getViewport({ scale: scale });
+                const scaledViewport = page.getViewport({ scale: scale });
 
-            canvas.width = scaledViewport.width;
-            canvas.height = scaledViewport.height;
+                // Double buffering: render to offscreen canvas first
+                const offscreen = document.createElement('canvas');
+                offscreen.width = scaledViewport.width;
+                offscreen.height = scaledViewport.height;
+                const offCtx = offscreen.getContext('2d');
 
-            const renderContext = {
-                canvasContext: ctx,
-                viewport: scaledViewport
-            };
+                await page.render({
+                    canvasContext: offCtx,
+                    viewport: scaledViewport
+                }).promise;
 
-            await page.render(renderContext).promise;
+                // Swap: copy offscreen to visible canvas in one shot
+                canvas.width = scaledViewport.width;
+                canvas.height = scaledViewport.height;
+                ctx.drawImage(offscreen, 0, 0);
 
-            // Notify Android about current page
-            if (window.SignageInterface) {
-                window.SignageInterface.onPageChanged(currentPage, totalPages);
+                // Notify Android about current page
+                if (window.SignageInterface) {
+                    window.SignageInterface.onPageChanged(currentPage, totalPages);
+                }
+            } catch (err) {
+                console.error('Render error:', err);
+            } finally {
+                isRendering = false;
             }
         }
 
