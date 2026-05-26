@@ -124,19 +124,35 @@
             }
         }
 
+        // setTimeout chain: next page is scheduled only AFTER current render completes
         function startPageRotation() {
-            if (pageTimer) clearInterval(pageTimer);
+            stopPageTimer();
             if (totalPages <= 1) return;
+            scheduleNextPage();
+        }
 
-            pageTimer = setInterval(() => {
+        function scheduleNextPage() {
+            pageTimer = setTimeout(async () => {
                 currentPage = (currentPage % totalPages) + 1;
-                renderPage(currentPage);
+                await renderPage(currentPage);
+                // Schedule next only after render is fully done
+                if (pageTimer !== null) {
+                    scheduleNextPage();
+                }
             }, pageDuration * 1000);
+        }
+
+        function stopPageTimer() {
+            if (pageTimer !== null) {
+                clearTimeout(pageTimer);
+                pageTimer = null;
+            }
         }
 
         // Called from Android: receives Base64-encoded PDF data
         // firstPageOnly: if true, only render page 1 without auto-rotation
         window.loadPdfBase64 = function(base64Data, duration, firstPageOnly) {
+            stopPageTimer();
             pageDuration = duration || 10;
             try {
                 const binaryString = atob(base64Data);
@@ -151,10 +167,7 @@
         };
 
         window.stopPdf = function() {
-            if (pageTimer) {
-                clearInterval(pageTimer);
-                pageTimer = null;
-            }
+            stopPageTimer();
         };
 
         window.getPageInfo = function() {
