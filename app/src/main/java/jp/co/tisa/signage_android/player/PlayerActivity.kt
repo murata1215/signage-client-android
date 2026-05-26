@@ -195,8 +195,8 @@ class PlayerActivity : ComponentActivity() {
 
         val keyCode = event.keyCode
 
-        // F4 key (KEYCODE_TV_INPUT=178 on DS-STBRC03) toggles debug overlay
-        if (keyCode == 178) {
+        // KEYCODE_BOOKMARK=93 (DS-STBRC03 remote) toggles debug overlay
+        if (keyCode == 93) {
             toggleDebugOverlay()
             return true
         }
