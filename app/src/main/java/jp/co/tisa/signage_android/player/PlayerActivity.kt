@@ -108,16 +108,35 @@ class PlayerActivity : ComponentActivity() {
         // Initialize managers
         configManager = ConfigManager(this)
 
+        // Register broadcast receiver for update logs (both modes)
+        val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(updateLogReceiver, filter)
+        }
+
         if (SMB_TEST_MODE) {
-            // SMBテストモード: サーバー設定不要
-            // ダミーのServerClient/ScheduleManagerを初期化（既存コードの型安全性のため）
-            val dummyConfig = jp.co.tisa.signage_android.data.SignageConfig("http://localhost", "dummy", 60)
-            serverClient = ServerClient(dummyConfig)
+            // SMBテストモード: サーバー設定があればそれを使う、なければダミー
+            val config = configManager.getConfig()
+            val actualConfig = config ?: jp.co.tisa.signage_android.data.SignageConfig("http://localhost", "dummy", 60)
+            serverClient = ServerClient(actualConfig)
             scheduleManager = ScheduleManager(configManager, serverClient)
             pdfCacheManager = PdfCacheManager(this, serverClient)
             smbPdfManager = SmbPdfManager(this)
 
-            addDebugLog("[SMB] テストモード開始")
+            // サーバー設定がある場合はSignageService(アップデートチェック)も起動
+            if (config != null) {
+                val serviceIntent = Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+                addDebugLog("[SMB] テストモード開始 (アップデートチェック有効)")
+            } else {
+                addDebugLog("[SMB] テストモード開始 (サーバー設定なし)")
+            }
             startSmbShareGroup()
         } else {
             val config = configManager.getConfig() ?: run {
@@ -127,14 +146,6 @@ class PlayerActivity : ComponentActivity() {
             serverClient = ServerClient(config)
             scheduleManager = ScheduleManager(configManager, serverClient)
             pdfCacheManager = PdfCacheManager(this, serverClient)
-
-            // Register broadcast receiver for update logs
-            val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
-            } else {
-                registerReceiver(updateLogReceiver, filter)
-            }
 
             // Start playback
             coroutineScope.launch {
