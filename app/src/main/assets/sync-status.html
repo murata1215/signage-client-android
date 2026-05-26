@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sync Status</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%; height: 100%;
+            background: #000; color: #fff;
+            font-family: 'Noto Sans JP', 'Hiragino Sans', sans-serif;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            overflow: hidden;
+        }
+        .title {
+            font-size: 3em;
+            font-weight: bold;
+            margin-bottom: 0.5em;
+            letter-spacing: 0.1em;
+        }
+        .status {
+            font-size: 1.5em;
+            color: #aaa;
+            text-align: center;
+            max-width: 80%;
+            word-break: break-all;
+        }
+        .spinner {
+            margin-top: 1.5em;
+            width: 50px; height: 50px;
+            border: 5px solid #333;
+            border-top: 5px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="title" id="title">*** 更新中 ***</div>
+    <div class="status" id="status">接続中...</div>
+    <div class="spinner" id="spinner"></div>
+    <script>
+        window.updateSyncStatus = function(message) {
+            document.getElementById('status').textContent = message;
+        };
+        window.showComplete = function(message) {
+            document.getElementById('status').textContent = message;
+            document.getElementById('title').textContent = '*** 同期完了 ***';
+            document.getElementById('spinner').style.display = 'none';
+        };
+    </script>
+</body>
+</html>

@@ -50,14 +50,20 @@
         const canvas = document.getElementById('pdf-canvas');
         const ctx = canvas.getContext('2d');
 
-        async function loadPdfFromData(data) {
+        let firstPageOnlyMode = false;
+
+        async function loadPdfFromData(data, firstPageOnly) {
             try {
+                firstPageOnlyMode = !!firstPageOnly;
                 const loadingTask = pdfjsLib.getDocument({ data: data });
                 pdfDoc = await loadingTask.promise;
                 totalPages = pdfDoc.numPages;
                 currentPage = 1;
                 await renderPage(currentPage);
-                startPageRotation();
+                if (!firstPageOnlyMode) {
+                    startPageRotation();
+                }
+                // firstPageOnlyの場合は1ページ目を表示したまま停止
             } catch (err) {
                 console.error('PDF load error:', err);
             }
@@ -104,7 +110,8 @@
         }
 
         // Called from Android: receives Base64-encoded PDF data
-        window.loadPdfBase64 = function(base64Data, duration) {
+        // firstPageOnly: if true, only render page 1 without auto-rotation
+        window.loadPdfBase64 = function(base64Data, duration, firstPageOnly) {
             pageDuration = duration || 10;
             try {
                 const binaryString = atob(base64Data);
@@ -112,7 +119,7 @@
                 for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
-                loadPdfFromData(bytes.buffer);
+                loadPdfFromData(bytes.buffer, firstPageOnly);
             } catch (err) {
                 console.error('Base64 decode error:', err);
             }

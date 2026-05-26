@@ -38,10 +38,15 @@ import kotlin.math.abs
 
 class PlayerActivity : ComponentActivity() {
 
+    // SMB Test Mode: set to true to bypass server and show SMB PDFs only
+    private val SMB_TEST_MODE = true
+
     private lateinit var configManager: ConfigManager
     private lateinit var serverClient: ServerClient
     private lateinit var scheduleManager: ScheduleManager
     private lateinit var pdfCacheManager: PdfCacheManager
+    private var smbPdfManager: SmbPdfManager? = null
+    private var currentShareIndex: Int = 0
 
     private lateinit var containerLayout: FrameLayout
     private lateinit var webViewA: WebView
@@ -102,25 +107,39 @@ class PlayerActivity : ComponentActivity() {
 
         // Initialize managers
         configManager = ConfigManager(this)
-        val config = configManager.getConfig() ?: run {
-            finish()
-            return
-        }
-        serverClient = ServerClient(config)
-        scheduleManager = ScheduleManager(configManager, serverClient)
-        pdfCacheManager = PdfCacheManager(this, serverClient)
 
-        // Register broadcast receiver for update logs
-        val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
+        if (SMB_TEST_MODE) {
+            // SMBテストモード: サーバー設定不要
+            // ダミーのServerClient/ScheduleManagerを初期化（既存コードの型安全性のため）
+            val dummyConfig = jp.co.tisa.signage_android.data.SignageConfig("http://localhost", "dummy", 60)
+            serverClient = ServerClient(dummyConfig)
+            scheduleManager = ScheduleManager(configManager, serverClient)
+            pdfCacheManager = PdfCacheManager(this, serverClient)
+            smbPdfManager = SmbPdfManager(this)
+
+            addDebugLog("[SMB] テストモード開始")
+            startSmbShareGroup()
         } else {
-            registerReceiver(updateLogReceiver, filter)
-        }
+            val config = configManager.getConfig() ?: run {
+                finish()
+                return
+            }
+            serverClient = ServerClient(config)
+            scheduleManager = ScheduleManager(configManager, serverClient)
+            pdfCacheManager = PdfCacheManager(this, serverClient)
 
-        // Start playback
-        coroutineScope.launch {
-            startPlayback()
+            // Register broadcast receiver for update logs
+            val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(updateLogReceiver, filter)
+            }
+
+            // Start playback
+            coroutineScope.launch {
+                startPlayback()
+            }
         }
     }
 
@@ -558,6 +577,81 @@ class PlayerActivity : ComponentActivity() {
     // Playback Logic
     // =========================================================================
 
+    // =========================================================================
+    // SMB Test Mode: Share-level playback loop
+    // =========================================================================
+
+    private fun startSmbShareGroup() {
+        val manager = smbPdfManager ?: return
+        val configs = manager.getShareConfigs()
+        if (configs.isEmpty()) return
+        val config = configs[currentShareIndex % configs.size]
+
+        // Stop any running timers
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+        isPlaying = false
+
+        addDebugLog("[SMB] Share同期開始: ${config.path}")
+        statusBar.text = "SMB同期中: \\\\${config.host}\\${config.shareName}\\${config.path}"
+
+        // 1. Show sync status screen
+        activeWebView?.loadUrl("file:///android_asset/sync-status.html")
+
+        // 2. Wait for sync-status.html to load, then start sync
+        activeWebView?.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("sync-status.html") == true) {
+                    // Start background sync
+                    coroutineScope.launch {
+                        val playlist = withContext(Dispatchers.IO) {
+                            manager.syncShare(config) { progressMsg ->
+                                withContext(Dispatchers.Main) {
+                                    // Update sync screen
+                                    val escaped = progressMsg.replace("'", "\\'")
+                                    activeWebView?.evaluateJavascript(
+                                        "updateSyncStatus('$escaped');", null
+                                    )
+                                    // Update debug overlay
+                                    addDebugLog("[SMB] $progressMsg")
+                                }
+                            }
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            if (playlist.isEmpty()) {
+                                addDebugLog("[SMB] ${config.path} - ファイルなし")
+                                activeWebView?.evaluateJavascript(
+                                    "showComplete('ファイルが見つかりませんでした');", null
+                                )
+                                // 10秒待ってから次のShareへ
+                                handler.postDelayed({
+                                    currentShareIndex++
+                                    startSmbShareGroup()
+                                }, 10_000L)
+                                return@withContext
+                            }
+
+                            // Show completion message
+                            val completeMsg = "同期完了: ${playlist.size}件のPDF (${config.displayMode})"
+                            activeWebView?.evaluateJavascript(
+                                "showComplete('$completeMsg');", null
+                            )
+                            addDebugLog("[SMB] 同期完了: ${config.path} - ${playlist.size}件")
+
+                            // 10秒間完了画面を表示してから再生開始
+                            handler.postDelayed({
+                                scheduleManager.setLocalPlaylist(playlist)
+                                playCurrentContent()
+                            }, 10_000L)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private suspend fun startPlayback() {
         val schedule = scheduleManager.loadSchedule()
         if (schedule == null) {
@@ -613,6 +707,22 @@ class PlayerActivity : ComponentActivity() {
 
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
+
+        if (SMB_TEST_MODE) {
+            // SMBモード: Share末尾なら次のShareへ遷移
+            if (scheduleManager.isAtLastItem()) {
+                currentShareIndex++
+                addDebugLog("[SMB] Share切替 → index=$currentShareIndex")
+                // タイマーを止めてから次のShare同期画面へ
+                contentTimer?.let { handler.removeCallbacks(it) }
+                countdownTimer?.let { handler.removeCallbacks(it) }
+                handler.post { startSmbShareGroup() }
+                return
+            }
+            // Share内の次のPDFへ
+            handler.post { doAdvance() }
+            return
+        }
 
         coroutineScope.launch {
             val updated = scheduleManager.checkForUpdate()
@@ -689,7 +799,11 @@ class PlayerActivity : ComponentActivity() {
         webView.setInitialScale(100)
         when (item.type) {
             "pdf" -> {
-                val cachedFile = pdfCacheManager.getCachedPdfPath(item.contentId)
+                val cachedFile = if (SMB_TEST_MODE) {
+                    smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
+                } else {
+                    pdfCacheManager.getCachedPdfPath(item.contentId)
+                }
                 val duration = item.pdfPageDuration ?: 10
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -726,16 +840,21 @@ class PlayerActivity : ComponentActivity() {
             try {
                 val pdfBytes = if (cachedFile.exists()) {
                     cachedFile.readBytes()
-                } else {
+                } else if (!SMB_TEST_MODE) {
                     pdfCacheManager.downloadIfNeeded(item)
                     if (cachedFile.exists()) cachedFile.readBytes() else null
+                } else {
+                    null
                 }
 
                 if (pdfBytes != null) {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
+                    val firstPageOnly = if (SMB_TEST_MODE) {
+                        smbPdfManager?.getDisplayMode(item.contentId) == "firstPageOnly"
+                    } else false
                     withContext(Dispatchers.Main) {
                         webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', $duration);",
+                            "loadPdfBase64('$base64', $duration, $firstPageOnly);",
                             null
                         )
                         markPreloadReady(preloadType)

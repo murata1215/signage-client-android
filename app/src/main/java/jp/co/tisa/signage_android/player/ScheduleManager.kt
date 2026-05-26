@@ -106,4 +106,27 @@ class ScheduleManager(
     fun reset() {
         currentIndex = 0
     }
+
+    /**
+     * ローカルプレイリストを注入する（SMBテストモード用）。
+     * サーバー通信をバイパスし、指定されたアイテムを24時間再生可能なスケジュールとしてセット。
+     */
+    fun setLocalPlaylist(items: List<PlaylistItem>) {
+        currentSchedule = ScheduleResponse(
+            version = 0,
+            playStartTime = "00:00",
+            playEndTime = "23:59",
+            playlist = items
+        )
+        currentIndex = 0
+    }
+
+    /**
+     * 現在のインデックスがプレイリストの最後かどうかを返す。
+     */
+    fun isAtLastItem(): Boolean {
+        val items = playlist
+        if (items.isEmpty()) return true
+        return currentIndex >= items.size - 1
+    }
 }
