@@ -22,17 +22,23 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            position: relative;
         }
         canvas {
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
+            position: absolute;
+        }
+        .hidden-canvas {
+            visibility: hidden;
         }
     </style>
 </head>
 <body>
     <div id="pdf-container">
-        <canvas id="pdf-canvas"></canvas>
+        <canvas id="pdf-canvas-a"></canvas>
+        <canvas id="pdf-canvas-b" class="hidden-canvas"></canvas>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -47,10 +53,14 @@
         let pageDuration = 10;
         let pageTimer = null;
 
-        const canvas = document.getElementById('pdf-canvas');
-        const ctx = canvas.getContext('2d');
+        // Two-canvas swap: one visible, one hidden for rendering
+        const canvasA = document.getElementById('pdf-canvas-a');
+        const canvasB = document.getElementById('pdf-canvas-b');
+        let frontCanvas = canvasA;   // Currently visible
+        let backCanvas = canvasB;    // Hidden, used for next render
 
         let firstPageOnlyMode = false;
+        let isRendering = false;
 
         async function loadPdfFromData(data, firstPageOnly) {
             try {
@@ -63,13 +73,10 @@
                 if (!firstPageOnlyMode) {
                     startPageRotation();
                 }
-                // firstPageOnlyの場合は1ページ目を表示したまま停止
             } catch (err) {
                 console.error('PDF load error:', err);
             }
         }
-
-        let isRendering = false;
 
         async function renderPage(pageNum) {
             if (!pdfDoc || isRendering) return;
@@ -87,21 +94,24 @@
 
                 const scaledViewport = page.getViewport({ scale: scale });
 
-                // Double buffering: render to offscreen canvas first
-                const offscreen = document.createElement('canvas');
-                offscreen.width = scaledViewport.width;
-                offscreen.height = scaledViewport.height;
-                const offCtx = offscreen.getContext('2d');
+                // Render to the BACK (hidden) canvas
+                backCanvas.width = scaledViewport.width;
+                backCanvas.height = scaledViewport.height;
+                const backCtx = backCanvas.getContext('2d');
 
                 await page.render({
-                    canvasContext: offCtx,
+                    canvasContext: backCtx,
                     viewport: scaledViewport
                 }).promise;
 
-                // Swap: copy offscreen to visible canvas in one shot
-                canvas.width = scaledViewport.width;
-                canvas.height = scaledViewport.height;
-                ctx.drawImage(offscreen, 0, 0);
+                // Swap: show back canvas, hide front canvas
+                backCanvas.classList.remove('hidden-canvas');
+                frontCanvas.classList.add('hidden-canvas');
+
+                // Swap references
+                const temp = frontCanvas;
+                frontCanvas = backCanvas;
+                backCanvas = temp;
 
                 // Notify Android about current page
                 if (window.SignageInterface) {
