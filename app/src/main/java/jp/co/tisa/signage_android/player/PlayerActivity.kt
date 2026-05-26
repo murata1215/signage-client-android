@@ -195,8 +195,8 @@ class PlayerActivity : ComponentActivity() {
 
         val keyCode = event.keyCode
 
-        // F4 key toggles debug overlay (works in any mode)
-        if (keyCode == KeyEvent.KEYCODE_F4) {
+        // F4 key (KEYCODE_TV_INPUT=178 on DS-STBRC03) toggles debug overlay
+        if (keyCode == 178) {
             toggleDebugOverlay()
             return true
         }
