@@ -80,7 +80,9 @@ class AppUpdateManager(
         val sizeMb = apkFile.length() / (1024 * 1024)
         onLog("ダウンロード完了 (${sizeMb}MB)")
 
-        triggerInstallViaSession()
+        // Use Intent method (shows full install screen with "Open" button after completion)
+        // Session API causes immediate app kill without recovery screen
+        triggerInstallViaIntent()
         return true
     }
 
