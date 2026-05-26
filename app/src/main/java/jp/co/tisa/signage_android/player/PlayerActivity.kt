@@ -53,6 +53,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
     private var isDebugVisible = true
+    private val DEBUG_HEADER = "***デバッグウインドウ表示中 この画面はリモコンの下ボタン(V)で消えます***"
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -130,7 +131,7 @@ class PlayerActivity : ComponentActivity() {
         if (debugLines.size > 10) {
             debugLines.removeAt(0)
         }
-        debugTextView.text = debugLines.joinToString("\n")
+        debugTextView.text = DEBUG_HEADER + "\n" + debugLines.joinToString("\n")
     }
 
     private fun toggleDebugOverlay() {
@@ -504,7 +505,7 @@ class PlayerActivity : ComponentActivity() {
             setTextColor(0xFF00FF00.toInt()) // Green text
             textSize = 13f
             setPadding(16, 12, 16, 12)
-            text = "[UPDATE] 待機中..."
+            text = DEBUG_HEADER + "\n[UPDATE] 待機中..."
             isClickable = false
             isFocusable = false
             visibility = View.VISIBLE
