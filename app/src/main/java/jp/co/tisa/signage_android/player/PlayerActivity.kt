@@ -70,6 +70,8 @@ class PlayerActivity : ComponentActivity() {
     private var contentTimer: Runnable? = null
     private var countdownTimer: Runnable? = null
     private var remainingSeconds: Int = 0
+    private var currentPdfPage: Int = 0
+    private var totalPdfPages: Int = 0
     private var pollingJob: Job? = null
     private var isPlaying = false
     private var isPaused = false
@@ -301,7 +303,7 @@ class PlayerActivity : ComponentActivity() {
             scheduleManager.advanceToNext()
             val item = scheduleManager.getCurrentItem() ?: return
             loadContent(activeWebView!!, item)
-            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
+            statusBar.text = formatStatusText(item.name, "⏸ 一時停止中 (戻るで再開)")
         } else {
             advanceToNext()
         }
@@ -313,7 +315,7 @@ class PlayerActivity : ComponentActivity() {
             scheduleManager.goToPrevious()
             val item = scheduleManager.getCurrentItem() ?: return
             loadContent(activeWebView!!, item)
-            statusBar.text = "${item.name}  |  ⏸ 一時停止中 (戻るで再開)"
+            statusBar.text = formatStatusText(item.name, "⏸ 一時停止中 (戻るで再開)")
         } else {
             // Cancel current timers
             contentTimer?.let { handler.removeCallbacks(it) }
@@ -385,7 +387,7 @@ class PlayerActivity : ComponentActivity() {
 
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
-        statusBar.text = "${item?.name ?: ""}  |  ⏸ 一時停止中 (戻るで再開)"
+        statusBar.text = formatStatusText(item?.name ?: "", "⏸ 一時停止中 (戻るで再開)")
 
         enableWebViewInteraction()
     }
@@ -932,8 +934,15 @@ class PlayerActivity : ComponentActivity() {
 
     private fun updateStatusBar(item: PlaylistItem) {
         remainingSeconds = item.durationSeconds
+        currentPdfPage = 0
+        totalPdfPages = 0
         statusBar.text = "${item.name}  |  次の切替まで: ${remainingSeconds}秒"
         startCountdown()
+    }
+
+    private fun formatStatusText(itemName: String, suffix: String): String {
+        val pageInfo = if (totalPdfPages > 1) " ($currentPdfPage/$totalPdfPages)" else ""
+        return "$itemName$pageInfo  |  $suffix"
     }
 
     private fun startCountdown() {
@@ -943,7 +952,10 @@ class PlayerActivity : ComponentActivity() {
                 remainingSeconds--
                 if (remainingSeconds >= 0) {
                     val item = scheduleManager.getCurrentItem()
-                    statusBar.text = "${item?.name ?: ""}  |  次の切替まで: ${remainingSeconds}秒"
+                    statusBar.text = formatStatusText(
+                        item?.name ?: "",
+                        "次の切替まで: ${remainingSeconds}秒"
+                    )
                     handler.postDelayed(this, 1000)
                 }
             }
@@ -1001,13 +1013,16 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
+                currentPdfPage = current
+                totalPdfPages = total
                 val item = scheduleManager.getCurrentItem()
                 if (item != null) {
-                    if (isPaused) {
-                        statusBar.text = "${item.name} ($current/$total)  |  ⏸ 一時停止中 (戻るで再開)"
+                    val suffix = if (isPaused) {
+                        "⏸ 一時停止中 (戻るで再開)"
                     } else {
-                        statusBar.text = "${item.name} ($current/$total)  |  次の切替まで: ${remainingSeconds}秒"
+                        "次の切替まで: ${remainingSeconds}秒"
                     }
+                    statusBar.text = formatStatusText(item.name, suffix)
                 }
             }
         }
