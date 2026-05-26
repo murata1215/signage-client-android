@@ -555,7 +555,7 @@ class PlayerActivity : ComponentActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createWebView(): WebView {
-        return WebView(this).apply {
+        val wv = WebView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -581,9 +581,11 @@ class PlayerActivity : ComponentActivity() {
             isFocusableInTouchMode = false
             webViewClient = WebViewClient()
             webChromeClient = WebChromeClient()
-            addJavascriptInterface(PdfJsInterface(), "SignageInterface")
             setBackgroundColor(0xFF000000.toInt())
         }
+        // Pass WebView reference so onPageChanged only fires for active WebView
+        wv.addJavascriptInterface(PdfJsInterface(wv), "SignageInterface")
+        return wv
     }
 
     // =========================================================================
@@ -1009,10 +1011,14 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    inner class PdfJsInterface {
+    inner class PdfJsInterface(private val webView: WebView) {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
+                // Only update status bar from the ACTIVE WebView
+                // (ignore preloaded next/prev WebViews)
+                if (webView != activeWebView) return@post
+
                 currentPdfPage = current
                 totalPdfPages = total
                 val item = scheduleManager.getCurrentItem()
