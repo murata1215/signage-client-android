@@ -72,6 +72,8 @@ class PlayerActivity : ComponentActivity() {
     private var remainingSeconds: Int = 0
     private var currentPdfPage: Int = 0
     private var totalPdfPages: Int = 0
+    private var isAllPagesMode: Boolean = false  // allPagesモード: ページ単位カウントダウン
+    private var pdfPageDurationSec: Int = 10     // 1ページあたりの秒数
     private var pollingJob: Job? = null
     private var isPlaying = false
     private var isPaused = false
@@ -952,10 +954,20 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
 
     private fun updateStatusBar(item: PlaylistItem) {
-        remainingSeconds = item.durationSeconds
         currentPdfPage = 0
         totalPdfPages = 0
-        statusBar.text = "${item.name}  |  次の切替まで: ${remainingSeconds}秒"
+        isAllPagesMode = SMB_TEST_MODE && item.pdfPageDuration != null
+        pdfPageDurationSec = item.pdfPageDuration ?: 10
+
+        if (isAllPagesMode) {
+            // allPagesモード: ページ単位のカウントダウン (pdf-viewer.htmlが管理)
+            remainingSeconds = pdfPageDurationSec
+            statusBar.text = "${item.name}  |  次のページまで: ${remainingSeconds}秒"
+        } else {
+            // 通常モード: コンテンツ全体のカウントダウン
+            remainingSeconds = item.durationSeconds
+            statusBar.text = "${item.name}  |  次の切替まで: ${remainingSeconds}秒"
+        }
         startCountdown()
     }
 
@@ -971,9 +983,10 @@ class PlayerActivity : ComponentActivity() {
                 remainingSeconds--
                 if (remainingSeconds >= 0) {
                     val item = scheduleManager.getCurrentItem()
+                    val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                     statusBar.text = formatStatusText(
                         item?.name ?: "",
-                        "次の切替まで: ${remainingSeconds}秒"
+                        "$label: ${remainingSeconds}秒"
                     )
                     handler.postDelayed(this, 1000)
                 }
@@ -1038,12 +1051,22 @@ class PlayerActivity : ComponentActivity() {
 
                 currentPdfPage = current
                 totalPdfPages = total
+
+                // allPagesモード: ページが変わるたびにカウントダウンをリセット
+                if (isAllPagesMode) {
+                    remainingSeconds = pdfPageDurationSec
+                    // カウントダウンタイマー再起動
+                    countdownTimer?.let { handler.removeCallbacks(it) }
+                    startCountdown()
+                }
+
                 val item = scheduleManager.getCurrentItem()
                 if (item != null) {
                     val suffix = if (isPaused) {
                         "⏸ 一時停止中 (戻るで再開)"
                     } else {
-                        "次の切替まで: ${remainingSeconds}秒"
+                        val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
+                        "$label: ${remainingSeconds}秒"
                     }
                     statusBar.text = formatStatusText(item.name, suffix)
                 }
