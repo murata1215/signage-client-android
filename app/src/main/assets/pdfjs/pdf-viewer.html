@@ -43,8 +43,6 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>
-        // Use PDF.js 3.x (non-module) to avoid worker/CORS issues in WebView
-        // Disable worker to avoid cross-origin problems
         pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 
         let pdfDoc = null;
@@ -53,14 +51,16 @@
         let pageDuration = 10;
         let pageTimer = null;
 
-        // Two-canvas swap: one visible, one hidden for rendering
+        // Two-canvas swap
         const canvasA = document.getElementById('pdf-canvas-a');
         const canvasB = document.getElementById('pdf-canvas-b');
-        let frontCanvas = canvasA;   // Currently visible
-        let backCanvas = canvasB;    // Hidden, used for next render
+        let frontCanvas = canvasA;
+        let backCanvas = canvasB;
 
         let firstPageOnlyMode = false;
         let isRendering = false;
+        let dualPageMode = false;  // A4縦検出時にtrue
+        let pageStep = 1;         // 1=通常, 2=デュアルページ
 
         async function loadPdfFromData(data, firstPageOnly) {
             try {
@@ -69,7 +69,14 @@
                 pdfDoc = await loadingTask.promise;
                 totalPages = pdfDoc.numPages;
                 currentPage = 1;
-                await renderPage(currentPage);
+
+                // 1ページ目のアスペクト比で縦長判定
+                const firstPage = await pdfDoc.getPage(1);
+                const vp = firstPage.getViewport({ scale: 1 });
+                dualPageMode = (vp.height > vp.width) && totalPages >= 2;
+                pageStep = dualPageMode ? 2 : 1;
+
+                await renderCurrentPages();
                 if (!firstPageOnlyMode) {
                     startPageRotation();
                 }
@@ -78,44 +85,18 @@
             }
         }
 
-        async function renderPage(pageNum) {
+        /**
+         * 現在のcurrentPageから pageStep 分のページを描画する。
+         * dualPageMode時は2ページを左右に並べて1つのcanvasに描画。
+         */
+        async function renderCurrentPages() {
             if (!pdfDoc || isRendering) return;
             isRendering = true;
             try {
-                const page = await pdfDoc.getPage(pageNum);
-
-                const containerWidth = window.innerWidth;
-                const containerHeight = window.innerHeight;
-                const viewport = page.getViewport({ scale: 1 });
-
-                const scaleX = containerWidth / viewport.width;
-                const scaleY = containerHeight / viewport.height;
-                const scale = Math.min(scaleX, scaleY);
-
-                const scaledViewport = page.getViewport({ scale: scale });
-
-                // Render to the BACK (hidden) canvas
-                backCanvas.width = scaledViewport.width;
-                backCanvas.height = scaledViewport.height;
-                const backCtx = backCanvas.getContext('2d');
-
-                await page.render({
-                    canvasContext: backCtx,
-                    viewport: scaledViewport
-                }).promise;
-
-                // Swap: show back canvas, hide front canvas
-                backCanvas.classList.remove('hidden-canvas');
-                frontCanvas.classList.add('hidden-canvas');
-
-                // Swap references
-                const temp = frontCanvas;
-                frontCanvas = backCanvas;
-                backCanvas = temp;
-
-                // Notify Android about current page
-                if (window.SignageInterface) {
-                    window.SignageInterface.onPageChanged(currentPage, totalPages);
+                if (dualPageMode) {
+                    await renderDualPage(currentPage);
+                } else {
+                    await renderSinglePage(currentPage);
                 }
             } catch (err) {
                 console.error('Render error:', err);
@@ -124,26 +105,140 @@
             }
         }
 
-        // setTimeout chain: next page is scheduled only AFTER current render completes
+        async function renderSinglePage(pageNum) {
+            const page = await pdfDoc.getPage(pageNum);
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            const viewport = page.getViewport({ scale: 1 });
+
+            const scaleX = containerWidth / viewport.width;
+            const scaleY = containerHeight / viewport.height;
+            const scale = Math.min(scaleX, scaleY);
+            const scaledViewport = page.getViewport({ scale: scale });
+
+            // Render to back canvas
+            backCanvas.width = scaledViewport.width;
+            backCanvas.height = scaledViewport.height;
+            const ctx = backCanvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
+
+            swapCanvases();
+            notifyPageChanged();
+        }
+
+        async function renderDualPage(startPageNum) {
+            const containerWidth = window.innerWidth;
+            const containerHeight = window.innerHeight;
+            const gap = 8; // pixels between pages
+
+            // Left page (always exists)
+            const leftPage = await pdfDoc.getPage(startPageNum);
+            const leftVp = leftPage.getViewport({ scale: 1 });
+
+            // Right page (may not exist for odd last page)
+            const rightPageNum = startPageNum + 1;
+            const hasRightPage = rightPageNum <= totalPages;
+            let rightPage = null;
+            let rightVp = null;
+            if (hasRightPage) {
+                rightPage = await pdfDoc.getPage(rightPageNum);
+                rightVp = rightPage.getViewport({ scale: 1 });
+            }
+
+            // Calculate scale to fit both pages side by side
+            const singlePageWidth = leftVp.width;
+            const singlePageHeight = leftVp.height;
+            const totalNaturalWidth = hasRightPage
+                ? singlePageWidth * 2 + gap
+                : singlePageWidth;
+
+            const scaleX = containerWidth / totalNaturalWidth;
+            const scaleY = containerHeight / singlePageHeight;
+            const scale = Math.min(scaleX, scaleY);
+
+            const pageW = Math.floor(singlePageWidth * scale);
+            const pageH = Math.floor(singlePageHeight * scale);
+            const scaledGap = hasRightPage ? Math.floor(gap * scale) : 0;
+            const canvasW = hasRightPage ? pageW * 2 + scaledGap : pageW;
+
+            // Setup back canvas
+            backCanvas.width = canvasW;
+            backCanvas.height = pageH;
+            const ctx = backCanvas.getContext('2d');
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvasW, pageH);
+
+            // Render left page
+            const leftScaledVp = leftPage.getViewport({ scale: scale });
+            // Use offscreen canvas to render then draw
+            const leftOff = document.createElement('canvas');
+            leftOff.width = pageW;
+            leftOff.height = pageH;
+            await leftPage.render({
+                canvasContext: leftOff.getContext('2d'),
+                viewport: leftScaledVp
+            }).promise;
+            ctx.drawImage(leftOff, 0, 0);
+
+            // Render right page (if exists)
+            if (hasRightPage && rightPage) {
+                const rightScaledVp = rightPage.getViewport({ scale: scale });
+                const rightOff = document.createElement('canvas');
+                rightOff.width = pageW;
+                rightOff.height = pageH;
+                await rightPage.render({
+                    canvasContext: rightOff.getContext('2d'),
+                    viewport: rightScaledVp
+                }).promise;
+                ctx.drawImage(rightOff, pageW + scaledGap, 0);
+            }
+
+            swapCanvases();
+            notifyPageChanged();
+        }
+
+        function swapCanvases() {
+            backCanvas.classList.remove('hidden-canvas');
+            frontCanvas.classList.add('hidden-canvas');
+            const temp = frontCanvas;
+            frontCanvas = backCanvas;
+            backCanvas = temp;
+        }
+
+        function notifyPageChanged() {
+            if (window.SignageInterface) {
+                if (dualPageMode) {
+                    const endPage = Math.min(currentPage + 1, totalPages);
+                    // Report as "1-2/14" style via current=displayPage, total=totalPages
+                    window.SignageInterface.onPageChanged(currentPage, totalPages);
+                } else {
+                    window.SignageInterface.onPageChanged(currentPage, totalPages);
+                }
+            }
+        }
+
+        // setTimeout chain
         function startPageRotation() {
             stopPageTimer();
             if (totalPages <= 1) return;
+            // For dual mode with single page total, no rotation needed
+            if (dualPageMode && totalPages <= 2) return;
             scheduleNextPage();
         }
 
         function scheduleNextPage() {
             pageTimer = setTimeout(async () => {
-                if (currentPage >= totalPages) {
-                    // All pages shown — notify Android and stop
+                const nextStart = currentPage + pageStep;
+                if (nextStart > totalPages) {
+                    // All pages shown
                     stopPageTimer();
                     if (window.SignageInterface) {
                         window.SignageInterface.onAllPagesCompleted();
                     }
                     return;
                 }
-                currentPage = currentPage + 1;
-                await renderPage(currentPage);
-                // Schedule next only after render is fully done
+                currentPage = nextStart;
+                await renderCurrentPages();
                 if (pageTimer !== null) {
                     scheduleNextPage();
                 }
@@ -157,8 +252,7 @@
             }
         }
 
-        // Called from Android: receives Base64-encoded PDF data
-        // firstPageOnly: if true, only render page 1 without auto-rotation
+        // Called from Android
         window.loadPdfBase64 = function(base64Data, duration, firstPageOnly) {
             stopPageTimer();
             pageDuration = duration || 10;
@@ -179,13 +273,13 @@
         };
 
         window.getPageInfo = function() {
-            return JSON.stringify({ current: currentPage, total: totalPages });
+            return JSON.stringify({ current: currentPage, total: totalPages, dual: dualPageMode, step: pageStep });
         };
 
         // Handle resize
         window.addEventListener('resize', () => {
             if (pdfDoc) {
-                renderPage(currentPage);
+                renderCurrentPages();
             }
         });
 
