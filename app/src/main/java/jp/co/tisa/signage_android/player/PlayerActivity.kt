@@ -594,6 +594,10 @@ class PlayerActivity : ComponentActivity() {
 
         val types = schedule.playlist.groupBy { it.type }.mapValues { it.value.size }
         addDebugLog("[PLAY] スケジュール取得OK: ${schedule.playlist.size}件 $types")
+        // pdf_folderアイテムのフィールドをダンプ（デバッグ用）
+        schedule.playlist.filter { it.type == "pdf_folder" }.forEach { pf ->
+            addDebugLog("[PLAY] pdf_folder: name=${pf.name} smbPath=${pf.smbPath} user=${pf.smbUsername} pw=${if (pf.smbPassword != null) "set" else "null"} firstPage=${pf.firstPageOnly}")
+        }
         withContext(Dispatchers.Main) { statusBar.text = "スケジュール: ${schedule.playlist.size}件 PDFダウンロード中..." }
 
         pdfCacheManager.downloadAll(schedule.playlist)
@@ -680,7 +684,8 @@ class PlayerActivity : ComponentActivity() {
         currentPdfFolderItem = item
 
         addDebugLog("[SMB] フォルダ同期開始: ${item.name}")
-        statusBar.text = "SMB同期中: ${item.smbPath ?: ""}"
+        addDebugLog("[SMB] smbPath=${item.smbPath} user=${item.smbUsername} pw=${if (item.smbPassword != null) "***" else "null"} firstPage=${item.firstPageOnly}")
+        statusBar.text = "SMB同期中: ${item.smbPath ?: "(パス未設定)"}"
 
         // 1. Show sync status screen
         activeWebView?.loadUrl("file:///android_asset/sync-status.html")
