@@ -12,7 +12,9 @@ Android版サイネージクライアント。サーバー(signage-server)から
 ## Architecture
 - **WebViewベース**: コンテンツ表示はWebView x3 (active+next+prev 3枚ローテーション切替)
 - **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避)
+- **PDF 2キャンバススワップ**: ページ切替時のちらつき防止(canvas A/B交互表示)
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
+- **SMB PDFフォルダ**: type=pdf_folder でWindows共有フォルダからPDFを自動取得・ローテーション表示
 - **自動アップデート**: ACTION_VIEW Intent方式でOTA更新 (1分間隔チェック、白い画面で確認→完了後「開く」ボタン)
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
@@ -27,11 +29,13 @@ jp.co.tisa.signage_android/
 ├── data/
 │   ├── Models.kt            # データクラス(ScheduleResponse, PlaylistItem等)
 │   ├── ConfigManager.kt     # SharedPreferences設定管理
-│   └── ServerClient.kt      # OkHttp API通信(プロキシ対応)
+│   ├── ServerClient.kt      # OkHttp API通信(プロキシ対応)
+│   └── CryptoUtils.kt       # AES-256-CBC復号(SMBパスワード用)
 ├── player/
 │   ├── PlayerActivity.kt    # WebView再生画面(フルスクリーン)
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
-│   └── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ・サブプレイリスト生成
 ├── service/
 │   ├── SignageService.kt     # Foreground Service(ハートビート + アップデートチェック)
 │   ├── AppUpdateManager.kt   # OTA自動アップデート(PackageInstaller Session)
@@ -53,10 +57,17 @@ jp.co.tisa.signage_android/
 - minSdk = 24, targetSdk = 36
 - Kotlin + Jetpack Compose (Setup画面のみ) + WebView (コンテンツ表示)
 - OkHttp for HTTP (プロキシ設定が容易、response.use{}で確実にclose)
+- smbj 0.13.0 for SMB2/3 (純Java、Android互換、Windows共有フォルダ接続)
 - Gson for JSON serialization
 - Foreground Service for heartbeat (Android制約対応)
 - PDF表示はBase64注入方式 (file://間のCORS制約回避)
+- PDF 2キャンバススワップ方式 (canvas A/B交互表示でページ切替時のちらつき完全防止)
+- PDF allPagesモード: ページ送りはpdf-viewer.html内setTimeoutチェーン管理、完了時onAllPagesCompleted()でAndroidに通知
 - WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
+- PdfJsInterface にWebView参照を持たせ、activeWebViewからの通知のみステータスバー更新(先読みWebViewの干渉防止)
+- type=pdf_folder はサブプレイリスト方式で統合 (メインプレイリスト内にpdf_folderアイテム → 同期画面 → 子PDFサブループ → メイン次アイテムへ)
+- SMBパスワードはAES-256-CBC暗号化(サーバー/クライアント共通鍵)
+- スケジュール取得失敗/コンテンツなし時は60秒間隔リトライ
 - ACTION_VIEW Intent方式でOTA更新(白い確認画面→完了後「開く」ボタン。Session APIはコード残存だが未使用)
 - DS-STBRC03リモコンのキーマッピング: F1-F4はKEYCODE_F1-F4ではなく端末固有コード(F4=KEYCODE_TV_INPUT=178等)
 - dispatchKeyEvent でリモコンキーをView階層より先に捕捉

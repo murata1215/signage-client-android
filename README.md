@@ -8,9 +8,11 @@ Linux版 (Electron) の Android 移植版。
 
 - **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
-- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング
+- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止
+- **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
 - **スケジュールポーリング** - version ベースの差分検知、コンテンツ切替時にも更新チェック
+- **スケジュールリトライ** - 取得失敗/コンテンツなし時は60秒間隔でリトライ
 - **ハートビート送信** - Foreground Service で定期送信 (管理画面の稼働監視用)
 - **リモコン操作** - DPAD左右で前後移動、決定で一時停止/再開
 - **タッチジェスチャー** - スワイプで前後移動、ダブルタップで一時停止/再開
@@ -39,7 +41,9 @@ Linux版 (Electron) の Android 移植版。
 | UI (セットアップ) | Jetpack Compose + Material3 |
 | UI (コンテンツ表示) | WebView x3 (active+next+prev交互切替) |
 | 自動アップデート | ACTION_VIEW Intent方式 (Session APIはフォールバック用に残存) |
-| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 |
+| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 + 2キャンバススワップ |
+| SMB接続 | smbj 0.13.0 (純Java SMB2/3クライアント) |
+| 暗号化 | AES-256-CBC (SMBパスワード復号) |
 | HTTP通信 | OkHttp 4.x (プロキシ対応) |
 | JSON | Gson |
 | 非同期処理 | Kotlin Coroutines |
@@ -61,11 +65,13 @@ jp.co.tisa.signage_android/
 ├── data/
 │   ├── Models.kt            # データクラス (ScheduleResponse, PlaylistItem等)
 │   ├── ConfigManager.kt     # SharedPreferences 設定管理
-│   └── ServerClient.kt      # OkHttp API通信 (プロキシ対応)
+│   ├── ServerClient.kt      # OkHttp API通信 (プロキシ対応)
+│   └── CryptoUtils.kt       # AES-256-CBC復号 (SMBパスワード用)
 ├── player/
 │   ├── PlayerActivity.kt    # WebView再生画面 (フルスクリーン)
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
-│   └── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ管理
 ├── service/
 │   ├── SignageService.kt     # Foreground Service (ハートビート + アップデートチェック)
 │   ├── AppUpdateManager.kt   # OTA自動アップデート (PackageInstaller Session)
@@ -115,12 +121,18 @@ jp.co.tisa.signage_android/
   ├── config なし → セットアップ画面 → URL+Key入力 → 保存
   └── config あり → Foreground Service 開始 → PlayerActivity 起動
         ├── スケジュール取得 (サーバー → キャッシュ → フォールバック)
+        │   └── 取得失敗/コンテンツなし → 60秒間隔リトライ
         ├── PDF ダウンロード・キャッシュ
         ├── 時間帯判定
         │   ├── 時間帯内 → ローテーション再生開始
         │   └── 時間帯外 → 待機画面
         ├── ハートビート送信ループ
-        └── バックグラウンドポーリング (コンテンツ切替時にも更新チェック)
+        ├── バックグラウンドポーリング (コンテンツ切替時にも更新チェック)
+        └── type=pdf_folder 再生時
+            ├── SMB同期画面表示
+            ├── フォルダスキャン → 差分ダウンロード
+            ├── 子PDFサブプレイリスト再生
+            └── 全子PDF完了 → メインプレイリスト次アイテムへ
 
 再生中の設定変更
   5秒長押し → 設定画面 (現在の値が入った状態)
