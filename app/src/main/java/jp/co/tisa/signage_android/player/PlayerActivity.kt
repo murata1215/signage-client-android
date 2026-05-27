@@ -134,8 +134,15 @@ class PlayerActivity : ComponentActivity() {
 
         // Start playback
         addDebugLog("[INIT] startPlayback 開始")
+        statusBar.text = "初期化中..."
         coroutineScope.launch {
-            startPlayback()
+            try {
+                startPlayback()
+            } catch (e: Exception) {
+                addDebugLog("[ERROR] startPlayback例外: ${e.message}")
+                statusBar.text = "エラー: ${e.message}"
+                e.printStackTrace()
+            }
         }
     }
 
@@ -143,7 +150,7 @@ class PlayerActivity : ComponentActivity() {
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
             .format(java.util.Date())
         debugLines.add("[$time] $message")
-        if (debugLines.size > 10) {
+        if (debugLines.size > 20) {
             debugLines.removeAt(0)
         }
         debugTextView.text = DEBUG_HEADER + "\n" + debugLines.joinToString("\n")
@@ -574,15 +581,18 @@ class PlayerActivity : ComponentActivity() {
 
     private suspend fun startPlayback() {
         addDebugLog("[PLAY] スケジュール取得中...")
+        withContext(Dispatchers.Main) { statusBar.text = "スケジュール取得中..." }
         val schedule = scheduleManager.loadSchedule()
         if (schedule == null) {
             addDebugLog("[PLAY] スケジュール取得失敗 → standby")
+            withContext(Dispatchers.Main) { statusBar.text = "スケジュール取得失敗" }
             showStandby()
             return
         }
 
         val types = schedule.playlist.groupBy { it.type }.mapValues { it.value.size }
         addDebugLog("[PLAY] スケジュール取得OK: ${schedule.playlist.size}件 $types")
+        withContext(Dispatchers.Main) { statusBar.text = "スケジュール: ${schedule.playlist.size}件 PDFダウンロード中..." }
 
         pdfCacheManager.downloadAll(schedule.playlist)
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
@@ -590,6 +600,7 @@ class PlayerActivity : ComponentActivity() {
 
         if (!scheduleManager.isWithinPlayTime()) {
             addDebugLog("[PLAY] 再生時間外 (${schedule.playStartTime}-${schedule.playEndTime}) → standby")
+            withContext(Dispatchers.Main) { statusBar.text = "再生時間外 (${schedule.playStartTime}-${schedule.playEndTime})" }
             showStandby()
             startTimeCheck()
             return
