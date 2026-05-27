@@ -38,15 +38,16 @@ import kotlin.math.abs
 
 class PlayerActivity : ComponentActivity() {
 
-    // SMB Test Mode: set to true to bypass server and show SMB PDFs only
-    private val SMB_TEST_MODE = true
-
     private lateinit var configManager: ConfigManager
     private lateinit var serverClient: ServerClient
     private lateinit var scheduleManager: ScheduleManager
     private lateinit var pdfCacheManager: PdfCacheManager
     private var smbPdfManager: SmbPdfManager? = null
-    private var currentShareIndex: Int = 0
+
+    // pdf_folder サブプレイリスト管理
+    private var pdfFolderSubPlaylist: List<PlaylistItem>? = null
+    private var pdfFolderSubIndex: Int = 0
+    private var currentPdfFolderItem: PlaylistItem? = null
 
     private lateinit var containerLayout: FrameLayout
     private lateinit var webViewA: WebView
@@ -72,8 +73,8 @@ class PlayerActivity : ComponentActivity() {
     private var remainingSeconds: Int = 0
     private var currentPdfPage: Int = 0
     private var totalPdfPages: Int = 0
-    private var isAllPagesMode: Boolean = false  // allPagesモード: ページ単位カウントダウン
-    private var pdfPageDurationSec: Int = 10     // 1ページあたりの秒数
+    private var isAllPagesMode: Boolean = false
+    private var pdfPageDurationSec: Int = 10
     private var pollingJob: Job? = null
     private var isPlaying = false
     private var isPaused = false
@@ -112,7 +113,7 @@ class PlayerActivity : ComponentActivity() {
         // Initialize managers
         configManager = ConfigManager(this)
 
-        // Register broadcast receiver for update logs (both modes)
+        // Register broadcast receiver for update logs
         val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -120,41 +121,18 @@ class PlayerActivity : ComponentActivity() {
             registerReceiver(updateLogReceiver, filter)
         }
 
-        if (SMB_TEST_MODE) {
-            // SMBテストモード: サーバー設定があればそれを使う、なければダミー
-            val config = configManager.getConfig()
-            val actualConfig = config ?: jp.co.tisa.signage_android.data.SignageConfig("http://localhost", "dummy", 60)
-            serverClient = ServerClient(actualConfig)
-            scheduleManager = ScheduleManager(configManager, serverClient)
-            pdfCacheManager = PdfCacheManager(this, serverClient)
-            smbPdfManager = SmbPdfManager(this)
+        val config = configManager.getConfig() ?: run {
+            finish()
+            return
+        }
+        serverClient = ServerClient(config)
+        scheduleManager = ScheduleManager(configManager, serverClient)
+        pdfCacheManager = PdfCacheManager(this, serverClient)
+        smbPdfManager = SmbPdfManager(this)
 
-            // サーバー設定がある場合はSignageService(アップデートチェック)も起動
-            if (config != null) {
-                val serviceIntent = Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
-                }
-                addDebugLog("[SMB] テストモード開始 (アップデートチェック有効)")
-            } else {
-                addDebugLog("[SMB] テストモード開始 (サーバー設定なし)")
-            }
-            startSmbShareGroup()
-        } else {
-            val config = configManager.getConfig() ?: run {
-                finish()
-                return
-            }
-            serverClient = ServerClient(config)
-            scheduleManager = ScheduleManager(configManager, serverClient)
-            pdfCacheManager = PdfCacheManager(this, serverClient)
-
-            // Start playback
-            coroutineScope.launch {
-                startPlayback()
-            }
+        // Start playback
+        coroutineScope.launch {
+            startPlayback()
         }
     }
 
@@ -283,7 +261,6 @@ class PlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_F1 -> { addDebugLog("[KEY] F1 pressed"); true }
             KeyEvent.KEYCODE_F2 -> { addDebugLog("[KEY] F2 pressed"); true }
             KeyEvent.KEYCODE_F3 -> { addDebugLog("[KEY] F3 pressed"); true }
-            // Note: F4 is handled above (debug overlay toggle)
             // Volume/Mute keys (may be consumed by OS)
             KeyEvent.KEYCODE_VOLUME_MUTE -> { addDebugLog("[KEY] MUTE pressed"); true }
             KeyEvent.KEYCODE_VOLUME_UP -> { addDebugLog("[KEY] VOL+ pressed"); true }
@@ -347,8 +324,8 @@ class PlayerActivity : ComponentActivity() {
         val oldPrev = prevWebView
 
         activeWebView = oldPrev
-        nextWebView = oldActive  // Current content becomes "next" (one step forward)
-        prevWebView = oldNext    // Old next becomes prev (will be reloaded)
+        nextWebView = oldActive
+        prevWebView = oldNext
 
         // Crossfade
         activeWebView?.apply {
@@ -523,7 +500,6 @@ class PlayerActivity : ComponentActivity() {
         }
         containerLayout.addView(statusBar)
 
-        // Debug overlay for update logs (top-right)
         // Debug overlay: 1/4 screen, top-right
         val displayMetrics = resources.displayMetrics
         val quarterWidth = displayMetrics.widthPixels / 2
@@ -585,7 +561,6 @@ class PlayerActivity : ComponentActivity() {
             webChromeClient = WebChromeClient()
             setBackgroundColor(0xFF000000.toInt())
         }
-        // Pass WebView reference so onPageChanged only fires for active WebView
         wv.addJavascriptInterface(PdfJsInterface(wv), "SignageInterface")
         return wv
     }
@@ -593,87 +568,6 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
     // Playback Logic
     // =========================================================================
-
-    // =========================================================================
-    // SMB Test Mode: Share-level playback loop
-    // =========================================================================
-
-    private fun startSmbShareGroup() {
-        val manager = smbPdfManager ?: return
-        val configs = manager.getShareConfigs()
-        if (configs.isEmpty()) return
-        val config = configs[currentShareIndex % configs.size]
-
-        // Stop any running timers
-        contentTimer?.let { handler.removeCallbacks(it) }
-        countdownTimer?.let { handler.removeCallbacks(it) }
-        isPlaying = false
-
-        addDebugLog("[SMB] Share同期開始: ${config.path}")
-        statusBar.text = "SMB同期中: \\\\${config.host}\\${config.shareName}\\${config.path}"
-
-        // 1. Show sync status screen
-        activeWebView?.loadUrl("file:///android_asset/sync-status.html")
-
-        // 2. Wait for sync-status.html to load, then start sync
-        activeWebView?.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url?.contains("sync-status.html") == true) {
-                    // Start background sync
-                    coroutineScope.launch {
-                        val (playlist, downloadCount) = withContext(Dispatchers.IO) {
-                            manager.syncShare(config) { progressMsg ->
-                                withContext(Dispatchers.Main) {
-                                    // Update sync screen
-                                    val escaped = progressMsg.replace("'", "\\'")
-                                    activeWebView?.evaluateJavascript(
-                                        "updateSyncStatus('$escaped');", null
-                                    )
-                                    // Update debug overlay
-                                    addDebugLog("[SMB] $progressMsg")
-                                }
-                            }
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            if (playlist.isEmpty()) {
-                                addDebugLog("[SMB] ${config.path} - ファイルなし")
-                                activeWebView?.evaluateJavascript(
-                                    "showComplete('ファイルが見つかりませんでした');", null
-                                )
-                                // 10秒待ってから次のShareへ
-                                handler.postDelayed({
-                                    currentShareIndex++
-                                    startSmbShareGroup()
-                                }, 10_000L)
-                                return@withContext
-                            }
-
-                            if (downloadCount > 0) {
-                                // ダウンロードありの場合: 完了画面を10秒表示してから再生
-                                val completeMsg = "同期完了: ${downloadCount}件ダウンロード (全${playlist.size}件)"
-                                activeWebView?.evaluateJavascript(
-                                    "showComplete('$completeMsg');", null
-                                )
-                                addDebugLog("[SMB] 同期完了: ${config.path} - ${downloadCount}件DL / 全${playlist.size}件")
-
-                                handler.postDelayed({
-                                    scheduleManager.setLocalPlaylist(playlist)
-                                    playCurrentContent()
-                                }, 10_000L)
-                            } else {
-                                // ダウンロードなし(更新なし): すぐに再生開始
-                                addDebugLog("[SMB] ${config.path} - ${playlist.size}件 (更新なし)")
-                                scheduleManager.setLocalPlaylist(playlist)
-                                playCurrentContent()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     private suspend fun startPlayback() {
         val schedule = scheduleManager.loadSchedule()
@@ -698,6 +592,13 @@ class PlayerActivity : ComponentActivity() {
 
     private fun playCurrentContent() {
         val item = scheduleManager.getCurrentItem() ?: return
+
+        // pdf_folder タイプの場合は専用フローへ
+        if (item.type == "pdf_folder") {
+            startPdfFolderPlayback(item)
+            return
+        }
+
         isPlaying = true
         isPaused = false
         disableWebViewInteraction()
@@ -707,16 +608,14 @@ class PlayerActivity : ComponentActivity() {
         // Schedule next content
         contentTimer?.let { handler.removeCallbacks(it) }
 
-        // allPagesモード (pdfPageDuration != null) の場合:
+        // allPagesモード (pdfPageDuration != null かつ pdf_folderの子PDF) の場合:
         // ページ送りはpdf-viewer.htmlのsetTimeoutチェーンが管理し、
         // 全ページ完了時にonAllPagesCompleted()で通知される。
-        // contentTimerは安全弁として非常に長い値をセット。
-        val isAllPagesMode = SMB_TEST_MODE && item.pdfPageDuration != null
-        if (isAllPagesMode) {
-            // 安全弁: 万が一onAllPagesCompletedが来なかった場合のフォールバック
+        val isSubAllPages = pdfFolderSubPlaylist != null && item.pdfPageDuration != null
+        if (isSubAllPages) {
             val safetyDuration = ((item.durationSeconds + 30) * 1000).toLong()
             contentTimer = Runnable {
-                addDebugLog("[SMB] 安全弁タイマー発火 (通常はonAllPagesCompletedで切替)")
+                addDebugLog("[PDF] 安全弁タイマー発火")
                 advanceToNext()
             }.also {
                 handler.postDelayed(it, safetyDuration)
@@ -730,40 +629,151 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        // Preload both next and previous
-        preloadBothDirections()
+        // Preload both next and previous (only for main playlist items)
+        if (pdfFolderSubPlaylist == null) {
+            preloadBothDirections()
+        }
     }
 
-    private fun preloadBothDirections() {
-        nextReady = false
-        prevReady = false
-        scheduleManager.getNextItem()?.let { nextItem ->
-            preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
+    // =========================================================================
+    // pdf_folder: SMB同期 → 子PDFサブプレイリスト再生
+    // =========================================================================
+
+    private fun startPdfFolderPlayback(item: PlaylistItem) {
+        val manager = smbPdfManager ?: run {
+            addDebugLog("[SMB] SmbPdfManager未初期化")
+            advanceToNextMain()
+            return
         }
-        scheduleManager.getPreviousItem()?.let { prevItem ->
-            preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
+
+        // Stop any running timers
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+        currentPdfFolderItem = item
+
+        addDebugLog("[SMB] フォルダ同期開始: ${item.name}")
+        statusBar.text = "SMB同期中: ${item.smbPath ?: ""}"
+
+        // 1. Show sync status screen
+        activeWebView?.loadUrl("file:///android_asset/sync-status.html")
+
+        // 2. Wait for sync-status.html to load, then start sync
+        activeWebView?.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("sync-status.html") == true) {
+                    coroutineScope.launch {
+                        val (subPlaylist, downloadCount) = withContext(Dispatchers.IO) {
+                            manager.syncFolder(item) { progressMsg ->
+                                withContext(Dispatchers.Main) {
+                                    val escaped = progressMsg.replace("'", "\\'")
+                                    activeWebView?.evaluateJavascript(
+                                        "updateSyncStatus('$escaped');", null
+                                    )
+                                    addDebugLog("[SMB] $progressMsg")
+                                }
+                            }
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            if (subPlaylist.isEmpty()) {
+                                addDebugLog("[SMB] ${item.name} - ファイルなし")
+                                activeWebView?.evaluateJavascript(
+                                    "showComplete('ファイルが見つかりませんでした');", null
+                                )
+                                handler.postDelayed({
+                                    currentPdfFolderItem = null
+                                    advanceToNextMain()
+                                }, 10_000L)
+                                return@withContext
+                            }
+
+                            if (downloadCount > 0) {
+                                val completeMsg = "同期完了: ${downloadCount}件ダウンロード (全${subPlaylist.size}件)"
+                                activeWebView?.evaluateJavascript(
+                                    "showComplete('$completeMsg');", null
+                                )
+                                addDebugLog("[SMB] 同期完了: ${item.name} - ${downloadCount}件DL / 全${subPlaylist.size}件")
+
+                                handler.postDelayed({
+                                    startSubPlaylist(subPlaylist)
+                                }, 10_000L)
+                            } else {
+                                addDebugLog("[SMB] ${item.name} - ${subPlaylist.size}件 (更新なし)")
+                                startSubPlaylist(subPlaylist)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    private fun startSubPlaylist(subPlaylist: List<PlaylistItem>) {
+        pdfFolderSubPlaylist = subPlaylist
+        pdfFolderSubIndex = 0
+        playNextSubPdf()
+    }
+
+    private fun playNextSubPdf() {
+        val subList = pdfFolderSubPlaylist ?: return
+        if (pdfFolderSubIndex >= subList.size) {
+            // 全子PDF完了 → メインプレイリストの次へ
+            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
+            pdfFolderSubPlaylist = null
+            pdfFolderSubIndex = 0
+            currentPdfFolderItem = null
+            advanceToNextMain()
+            return
+        }
+
+        val subItem = subList[pdfFolderSubIndex]
+        isPlaying = true
+        isPaused = false
+        disableWebViewInteraction()
+        loadContent(activeWebView!!, subItem)
+        updateStatusBar(subItem)
+
+        // Schedule next sub-PDF
+        contentTimer?.let { handler.removeCallbacks(it) }
+        val isSubAllPages = subItem.pdfPageDuration != null
+        if (isSubAllPages) {
+            // allPages: onAllPagesCompletedで切替、安全弁タイマー
+            val safetyDuration = ((subItem.durationSeconds + 30) * 1000).toLong()
+            contentTimer = Runnable {
+                addDebugLog("[PDF] 安全弁タイマー発火")
+                advanceToNext()
+            }.also {
+                handler.postDelayed(it, safetyDuration)
+            }
+        } else {
+            // firstPageOnly: duration_seconds秒後に次へ
+            val duration = (subItem.durationSeconds * 1000).toLong()
+            contentTimer = Runnable {
+                advanceToNext()
+            }.also {
+                handler.postDelayed(it, duration)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Advance logic
+    // =========================================================================
 
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
 
-        if (SMB_TEST_MODE) {
-            // SMBモード: Share末尾なら次のShareへ遷移
-            if (scheduleManager.isAtLastItem()) {
-                currentShareIndex++
-                addDebugLog("[SMB] Share切替 → index=$currentShareIndex")
-                // タイマーを止めてから次のShare同期画面へ
-                contentTimer?.let { handler.removeCallbacks(it) }
-                countdownTimer?.let { handler.removeCallbacks(it) }
-                handler.post { startSmbShareGroup() }
-                return
-            }
-            // Share内の次のPDFへ
-            handler.post { doAdvance() }
+        // pdf_folderサブプレイリスト内の場合: 次の子PDFへ
+        if (pdfFolderSubPlaylist != null) {
+            pdfFolderSubIndex++
+            contentTimer?.let { handler.removeCallbacks(it) }
+            countdownTimer?.let { handler.removeCallbacks(it) }
+            handler.post { playNextSubPdf() }
             return
         }
 
+        // 通常のメインプレイリスト進行
         coroutineScope.launch {
             val updated = scheduleManager.checkForUpdate()
             if (updated) {
@@ -773,6 +783,33 @@ class PlayerActivity : ComponentActivity() {
                 pdfCacheManager.cleanupUnused(activeIds)
             }
             handler.post { doAdvance() }
+        }
+    }
+
+    /** メインプレイリストを強制的に次のアイテムへ進める（pdf_folder完了時等） */
+    private fun advanceToNextMain() {
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+        scheduleManager.advanceToNext()
+        playCurrentContent()
+    }
+
+    private fun preloadBothDirections() {
+        nextReady = false
+        prevReady = false
+        scheduleManager.getNextItem()?.let { nextItem ->
+            if (nextItem.type != "pdf_folder") {
+                preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
+            } else {
+                nextReady = true // pdf_folderはプリロード不要
+            }
+        }
+        scheduleManager.getPreviousItem()?.let { prevItem ->
+            if (prevItem.type != "pdf_folder") {
+                preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
+            } else {
+                prevReady = true
+            }
         }
     }
 
@@ -790,8 +827,8 @@ class PlayerActivity : ComponentActivity() {
         val oldPrev = prevWebView
 
         activeWebView = oldNext
-        prevWebView = oldActive  // Current content becomes "prev" (one step back)
-        nextWebView = oldPrev    // Old prev becomes next (will be reloaded)
+        prevWebView = oldActive
+        nextWebView = oldPrev
 
         // Crossfade
         activeWebView?.apply {
@@ -806,6 +843,13 @@ class PlayerActivity : ComponentActivity() {
         // Advance schedule
         scheduleManager.advanceToNext()
         val item = scheduleManager.getCurrentItem() ?: return
+
+        // pdf_folder の場合は専用フローへ
+        if (item.type == "pdf_folder") {
+            startPdfFolderPlayback(item)
+            return
+        }
+
         updateStatusBar(item)
 
         // prevReady is true (old active already had content)
@@ -823,9 +867,17 @@ class PlayerActivity : ComponentActivity() {
         // Preload next into recycled WebView
         nextReady = false
         scheduleManager.getNextItem()?.let { nextItem ->
-            preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
+            if (nextItem.type != "pdf_folder") {
+                preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
+            } else {
+                nextReady = true
+            }
         }
     }
+
+    // =========================================================================
+    // Content Loading
+    // =========================================================================
 
     private fun loadContent(webView: WebView, item: PlaylistItem) {
         loadContentInternal(webView, item, preloadType = null)
@@ -839,7 +891,8 @@ class PlayerActivity : ComponentActivity() {
         webView.setInitialScale(100)
         when (item.type) {
             "pdf" -> {
-                val cachedFile = if (SMB_TEST_MODE) {
+                // pdf_folderの子PDFの場合はSmbPdfManagerから取得
+                val cachedFile = if (pdfFolderSubPlaylist != null) {
                     smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
                 } else {
                     pdfCacheManager.getCachedPdfPath(item.contentId)
@@ -880,7 +933,8 @@ class PlayerActivity : ComponentActivity() {
             try {
                 val pdfBytes = if (cachedFile.exists()) {
                     cachedFile.readBytes()
-                } else if (!SMB_TEST_MODE) {
+                } else if (pdfFolderSubPlaylist == null) {
+                    // 通常PDF: サーバーからダウンロード試行
                     pdfCacheManager.downloadIfNeeded(item)
                     if (cachedFile.exists()) cachedFile.readBytes() else null
                 } else {
@@ -889,8 +943,8 @@ class PlayerActivity : ComponentActivity() {
 
                 if (pdfBytes != null) {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
-                    val firstPageOnly = if (SMB_TEST_MODE) {
-                        smbPdfManager?.getDisplayMode(item.contentId) == "firstPageOnly"
+                    val firstPageOnly = if (pdfFolderSubPlaylist != null) {
+                        currentPdfFolderItem?.firstPageOnly == true
                     } else false
                     withContext(Dispatchers.Main) {
                         webView.evaluateJavascript(
@@ -956,15 +1010,13 @@ class PlayerActivity : ComponentActivity() {
     private fun updateStatusBar(item: PlaylistItem) {
         currentPdfPage = 0
         totalPdfPages = 0
-        isAllPagesMode = SMB_TEST_MODE && item.pdfPageDuration != null
+        isAllPagesMode = pdfFolderSubPlaylist != null && item.pdfPageDuration != null
         pdfPageDurationSec = item.pdfPageDuration ?: 10
 
         if (isAllPagesMode) {
-            // allPagesモード: ページ単位のカウントダウン (pdf-viewer.htmlが管理)
             remainingSeconds = pdfPageDurationSec
             statusBar.text = "${item.name}  |  次のページまで: ${remainingSeconds}秒"
         } else {
-            // 通常モード: コンテンツ全体のカウントダウン
             remainingSeconds = item.durationSeconds
             statusBar.text = "${item.name}  |  次の切替まで: ${remainingSeconds}秒"
         }
@@ -982,7 +1034,11 @@ class PlayerActivity : ComponentActivity() {
             override fun run() {
                 remainingSeconds--
                 if (remainingSeconds >= 0) {
-                    val item = scheduleManager.getCurrentItem()
+                    val item = if (pdfFolderSubPlaylist != null && pdfFolderSubIndex < (pdfFolderSubPlaylist?.size ?: 0)) {
+                        pdfFolderSubPlaylist!![pdfFolderSubIndex]
+                    } else {
+                        scheduleManager.getCurrentItem()
+                    }
                     val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                     statusBar.text = formatStatusText(
                         item?.name ?: "",
@@ -1045,22 +1101,22 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
-                // Only update status bar from the ACTIVE WebView
-                // (ignore preloaded next/prev WebViews)
                 if (webView != activeWebView) return@post
 
                 currentPdfPage = current
                 totalPdfPages = total
 
-                // allPagesモード: ページが変わるたびにカウントダウンをリセット
                 if (isAllPagesMode) {
                     remainingSeconds = pdfPageDurationSec
-                    // カウントダウンタイマー再起動
                     countdownTimer?.let { handler.removeCallbacks(it) }
                     startCountdown()
                 }
 
-                val item = scheduleManager.getCurrentItem()
+                val item = if (pdfFolderSubPlaylist != null && pdfFolderSubIndex < (pdfFolderSubPlaylist?.size ?: 0)) {
+                    pdfFolderSubPlaylist!![pdfFolderSubIndex]
+                } else {
+                    scheduleManager.getCurrentItem()
+                }
                 if (item != null) {
                     val suffix = if (isPaused) {
                         "⏸ 一時停止中 (戻るで再開)"
@@ -1081,11 +1137,9 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onAllPagesCompleted() {
             handler.post {
-                // Only respond from the active WebView
                 if (webView != activeWebView) return@post
 
                 addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
-                // Cancel the safety timer and advance
                 contentTimer?.let { handler.removeCallbacks(it) }
                 countdownTimer?.let { handler.removeCallbacks(it) }
                 advanceToNext()

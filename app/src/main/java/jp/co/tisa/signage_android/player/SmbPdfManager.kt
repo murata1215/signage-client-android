@@ -14,6 +14,7 @@ import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.share.DiskShare
+import jp.co.tisa.signage_android.data.CryptoUtils
 import jp.co.tisa.signage_android.data.PlaylistItem
 import java.io.File
 import java.io.FileOutputStream
@@ -23,8 +24,8 @@ import java.util.concurrent.TimeUnit
 /**
  * SMB共有フォルダからPDFを取得・キャッシュ・プレイリスト生成するマネージャ。
  *
- * 各Shareの表示順番が来るたびに syncShare() を呼び出し、
- * 差分ダウンロード（変更検出: lastModified + fileSize）を行う。
+ * サーバーAPIから受信した type="pdf_folder" のPlaylistItemを受け取り、
+ * SMB共有フォルダを同期して子PDFのPlaylistItemリストを返す。
  */
 class SmbPdfManager(private val context: Context) {
 
@@ -32,52 +33,18 @@ class SmbPdfManager(private val context: Context) {
     // Data classes
     // =====================================================================
 
-    data class SmbShareConfig(
-        val host: String,
-        val shareName: String,
-        val path: String,
-        val username: String,
-        val password: String,
-        val domain: String = "",
-        val displayMode: String,   // "firstPageOnly" or "allPages"
-        val durationSeconds: Int,
-    )
-
-    data class SmbCacheEntry(
+    private data class SmbCacheEntry(
         val filename: String,
         val lastModified: Long,
         val fileSize: Long,
         val pageCount: Int
     )
 
-    // =====================================================================
-    // Test configurations (hardcoded)
-    // =====================================================================
-
-    companion object {
-        val TEST_CONFIGS = listOf(
-            SmbShareConfig(
-                host = "10.20.171.21",
-                shareName = "05lf",
-                path = "workspace/signage/030",
-                username = "05_TAKATSUJI",
-                password = "Lf6411",
-                domain = "",
-                displayMode = "firstPageOnly",
-                durationSeconds = 10
-            ),
-            SmbShareConfig(
-                host = "10.20.171.21",
-                shareName = "05lf",
-                path = "workspace/signage/031",
-                username = "05_MEIKO",
-                password = "Lf6411",
-                domain = "",
-                displayMode = "allPages",
-                durationSeconds = 10
-            ),
-        )
-    }
+    private data class ParsedUncPath(
+        val host: String,
+        val shareName: String,
+        val path: String
+    )
 
     // =====================================================================
     // State
@@ -88,32 +55,67 @@ class SmbPdfManager(private val context: Context) {
         if (!exists()) mkdirs()
     }
 
-    // contentId → display mode mapping (populated by syncShare)
-    private val displayModeMap = mutableMapOf<Int, String>()
-    // contentId → local file mapping (populated by syncShare)
+    // contentId → local file mapping (populated by syncFolder)
     private val localFileMap = mutableMapOf<Int, File>()
 
-    fun getShareConfigs(): List<SmbShareConfig> = TEST_CONFIGS
-
-    fun getDisplayMode(contentId: Int): String = displayModeMap[contentId] ?: "allPages"
-
     fun getLocalPdfFile(contentId: Int): File? = localFileMap[contentId]
+
+    // =====================================================================
+    // UNC Path parsing
+    // =====================================================================
+
+    /**
+     * UNCパスを host / shareName / path に分解する。
+     * 例: "\\\\10.20.171.21\\05lf\\workspace\\signage\\030"
+     *   → host="10.20.171.21", shareName="05lf", path="workspace/signage/030"
+     */
+    private fun parseUncPath(uncPath: String): ParsedUncPath? {
+        // Normalize: remove leading \\ and split by \ or /
+        val cleaned = uncPath.trimStart('\\').trimStart('/')
+        val segments = cleaned.split('\\', '/').filter { it.isNotEmpty() }
+        if (segments.size < 2) return null
+        return ParsedUncPath(
+            host = segments[0],
+            shareName = segments[1],
+            path = segments.drop(2).joinToString("/")
+        )
+    }
 
     // =====================================================================
     // Sync logic
     // =====================================================================
 
     /**
-     * 指定したShareを同期し、PlaylistItemリストとダウンロード件数のPairを返す。
-     * @param config Share設定
-     * @param onProgress 進捗メッセージのコールバック（UIスレッドで呼ばれる想定）
-     * @return Pair(プレイリスト, ダウンロード件数)
+     * サーバーから受信した pdf_folder PlaylistItem を元にSMBフォルダを同期し、
+     * 子PDFのPlaylistItemリストとダウンロード件数を返す。
+     *
+     * @param folderItem type="pdf_folder" のPlaylistItem
+     * @param onProgress 進捗メッセージのコールバック
+     * @return Pair(子PDFプレイリスト, ダウンロード件数)
      */
-    suspend fun syncShare(
-        config: SmbShareConfig,
+    suspend fun syncFolder(
+        folderItem: PlaylistItem,
         onProgress: suspend (String) -> Unit
     ): Pair<List<PlaylistItem>, Int> {
-        val shareHash = "${config.host}_${config.shareName}_${config.path}".hashCode()
+        val smbPath = folderItem.smbPath ?: run {
+            onProgress("エラー: SMBパスが未設定")
+            return Pair(emptyList(), 0)
+        }
+        val parsed = parseUncPath(smbPath) ?: run {
+            onProgress("エラー: SMBパスの形式が不正: $smbPath")
+            return Pair(emptyList(), 0)
+        }
+        val username = folderItem.smbUsername ?: ""
+        val password = try {
+            CryptoUtils.decryptAes256Cbc(folderItem.smbPassword ?: "")
+        } catch (e: Exception) {
+            folderItem.smbPassword ?: ""
+        }
+        val isFirstPageOnly = folderItem.firstPageOnly == true
+        val durationSeconds = folderItem.durationSeconds
+        val pdfPageDuration = folderItem.pdfPageDuration
+
+        val shareHash = "${parsed.host}_${parsed.shareName}_${parsed.path}".hashCode()
             .let { if (it < 0) "n${-it}" else "$it" }
         val cacheDir = File(baseCacheDir, "share_$shareHash").apply {
             if (!exists()) mkdirs()
@@ -125,25 +127,24 @@ class SmbPdfManager(private val context: Context) {
         val existingMap = existingEntries.associateBy { it.filename }.toMutableMap()
 
         // Connect to SMB and list files
-        val remoteFiles: List<SmbRemoteFile>
         try {
-            onProgress("${config.path} に接続中...")
+            onProgress("${parsed.path} に接続中...")
 
             val smbConfig = SmbConfig.builder()
                 .withTimeout(15, TimeUnit.SECONDS)
                 .withSoTimeout(15, TimeUnit.SECONDS)
                 .build()
             val client = SMBClient(smbConfig)
-            val connection = client.connect(config.host)
+            val connection = client.connect(parsed.host)
             val authContext = AuthenticationContext(
-                config.username, config.password.toCharArray(), config.domain
+                username, password.toCharArray(), ""
             )
             val session = connection.authenticate(authContext)
-            val share = session.connectShare(config.shareName) as DiskShare
+            val share = session.connectShare(parsed.shareName) as DiskShare
 
-            onProgress("${config.path} ファイル一覧取得中...")
+            onProgress("${parsed.path} ファイル一覧取得中...")
 
-            remoteFiles = listPdfFiles(share, config.path)
+            val remoteFiles = listPdfFiles(share, parsed.path)
 
             // Determine which files need downloading
             val remoteFilenames = remoteFiles.map { it.filename }.toSet()
@@ -163,10 +164,8 @@ class SmbPdfManager(private val context: Context) {
                     downloadCount++
                     onProgress("${rf.filename} 取得中... ($downloadCount/${remoteFiles.size})")
 
-                    // Download the file
-                    downloadFile(share, config.path, rf.filename, localFile)
+                    downloadFile(share, parsed.path, rf.filename, localFile)
 
-                    // Count pages
                     val pageCount = countPdfPages(localFile)
 
                     newEntries.add(
@@ -178,7 +177,6 @@ class SmbPdfManager(private val context: Context) {
                         )
                     )
                 } else {
-                    // Use cached entry
                     newEntries.add(existing!!)
                 }
             }
@@ -205,8 +203,10 @@ class SmbPdfManager(private val context: Context) {
                 onProgress("同期完了: ${remoteFiles.size}件 (更新なし)")
             }
 
-            // Build playlist
-            return Pair(buildPlaylist(newEntries, cacheDir, config), downloadCount)
+            return Pair(
+                buildPlaylist(newEntries, cacheDir, folderItem, parsed, isFirstPageOnly, durationSeconds, pdfPageDuration),
+                downloadCount
+            )
 
         } catch (e: Exception) {
             e.printStackTrace()
@@ -216,7 +216,10 @@ class SmbPdfManager(private val context: Context) {
             val cachedEntries = loadMetadata(metadataFile)
             if (cachedEntries.isNotEmpty()) {
                 onProgress("キャッシュを使用: ${cachedEntries.size}件")
-                return Pair(buildPlaylist(cachedEntries, cacheDir, config), 0)
+                return Pair(
+                    buildPlaylist(cachedEntries, cacheDir, folderItem, parsed, isFirstPageOnly, durationSeconds, pdfPageDuration),
+                    0
+                )
             }
             return Pair(emptyList(), 0)
         }
@@ -240,11 +243,9 @@ class SmbPdfManager(private val context: Context) {
             val name = entry.fileName
             if (name == "." || name == "..") continue
 
-            // Check if it's a directory
             val attrs = entry.fileAttributes
             if (attrs != 0L && (attrs and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L) continue
 
-            // Only PDF files (case-insensitive)
             if (!name.lowercase().endsWith(".pdf")) continue
 
             result.add(
@@ -292,7 +293,7 @@ class SmbPdfManager(private val context: Context) {
             count
         } catch (e: Exception) {
             e.printStackTrace()
-            1 // Default to 1 page if can't read
+            1
         }
     }
 
@@ -326,47 +327,47 @@ class SmbPdfManager(private val context: Context) {
     private fun buildPlaylist(
         entries: List<SmbCacheEntry>,
         cacheDir: File,
-        config: SmbShareConfig
+        parentItem: PlaylistItem,
+        parsed: ParsedUncPath,
+        isFirstPageOnly: Boolean,
+        durationSeconds: Int,
+        pdfPageDuration: Int?
     ): List<PlaylistItem> {
         val items = mutableListOf<PlaylistItem>()
 
         for ((index, entry) in entries.sortedBy { it.filename.lowercase() }.withIndex()) {
-            val contentId = generateContentId(config, entry.filename)
+            val contentId = generateContentId(parsed, entry.filename)
             val localFile = File(cacheDir, entry.filename)
             if (!localFile.exists()) continue
 
-            // Store mappings
-            displayModeMap[contentId] = config.displayMode
+            // Store mapping
             localFileMap[contentId] = localFile
 
-            // allPagesモードでは、実際のページ送りはpdf-viewer.htmlが管理し
-            // onAllPagesCompleted()で完了通知する。durationSecondsは安全弁用。
-            val durationSeconds = if (config.displayMode == "allPages") {
-                (entry.pageCount + 1) * config.durationSeconds
+            // allPagesモードでは安全弁用にdurationSecondsを大きめに設定
+            val itemDuration = if (!isFirstPageOnly && pdfPageDuration != null) {
+                (entry.pageCount + 1) * pdfPageDuration
             } else {
-                config.durationSeconds
-            }
-
-            val pdfPageDuration = if (config.displayMode == "allPages") {
-                config.durationSeconds
-            } else {
-                null
+                durationSeconds
             }
 
             items.add(
                 PlaylistItem(
                     id = contentId,
-                    scope = "smb_${config.path}",
+                    scope = "smb_${parentItem.id}",
                     contentId = contentId,
                     name = entry.filename,
                     type = "pdf",
                     url = null,
                     fileUrl = null,
                     pdfPageDuration = pdfPageDuration,
-                    durationSeconds = durationSeconds,
+                    durationSeconds = itemDuration,
                     displayOrder = index,
                     useProxy = false,
-                    proxyUrl = null
+                    proxyUrl = null,
+                    smbPath = null,
+                    smbUsername = null,
+                    smbPassword = null,
+                    firstPageOnly = isFirstPageOnly
                 )
             )
         }
@@ -374,12 +375,8 @@ class SmbPdfManager(private val context: Context) {
         return items
     }
 
-    /**
-     * Generate a stable negative contentId from share config + filename.
-     * Negative to avoid collision with server-assigned positive IDs.
-     */
-    private fun generateContentId(config: SmbShareConfig, filename: String): Int {
-        val key = "${config.host}/${config.shareName}/${config.path}/$filename"
+    private fun generateContentId(parsed: ParsedUncPath, filename: String): Int {
+        val key = "${parsed.host}/${parsed.shareName}/${parsed.path}/$filename"
         val hash = key.hashCode()
         return if (hash > 0) -hash else if (hash == 0) -1 else hash
     }

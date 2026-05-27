@@ -27,7 +27,11 @@ data class PlaylistItem(
     @SerializedName("duration_seconds") val durationSeconds: Int,
     @SerializedName("display_order") val displayOrder: Int,
     @SerializedName("use_proxy") val useProxy: Boolean = false,
-    @SerializedName("proxy_url") val proxyUrl: String? = null
+    @SerializedName("proxy_url") val proxyUrl: String? = null,
+    @SerializedName("smb_path") val smbPath: String? = null,
+    @SerializedName("smb_username") val smbUsername: String? = null,
+    @SerializedName("smb_password") val smbPassword: String? = null,
+    @SerializedName("first_page_only") val firstPageOnly: Boolean? = null
 )
 
 data class UpdateInfo(
