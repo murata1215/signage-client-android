@@ -583,10 +583,12 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[PLAY] スケジュール取得中...")
         withContext(Dispatchers.Main) { statusBar.text = "スケジュール取得中..." }
         val schedule = scheduleManager.loadSchedule()
-        if (schedule == null) {
-            addDebugLog("[PLAY] スケジュール取得失敗 → standby")
-            withContext(Dispatchers.Main) { statusBar.text = "スケジュール取得失敗" }
+        if (schedule == null || schedule.playlist.isEmpty()) {
+            val reason = if (schedule == null) "取得失敗" else "コンテンツなし(0件)"
+            addDebugLog("[PLAY] $reason → 60秒後にリトライ")
+            withContext(Dispatchers.Main) { statusBar.text = "$reason (60秒後にリトライ)" }
             showStandby()
+            startScheduleRetry()
             return
         }
 
@@ -1011,6 +1013,36 @@ class PlayerActivity : ComponentActivity() {
                 }
             }
         }, 60_000)
+    }
+
+    /** スケジュール取得失敗/コンテンツなし時のリトライ（60秒間隔） */
+    private fun startScheduleRetry() {
+        val retryRunnable = object : Runnable {
+            override fun run() {
+                addDebugLog("[RETRY] スケジュール再取得中...")
+                val self = this
+                coroutineScope.launch {
+                    try {
+                        val schedule = scheduleManager.loadSchedule()
+                        if (schedule != null && schedule.playlist.isNotEmpty()) {
+                            addDebugLog("[RETRY] スケジュール取得成功: ${schedule.playlist.size}件 → 再生開始")
+                            startPlayback()
+                        } else {
+                            val reason = if (schedule == null) "取得失敗" else "コンテンツなし"
+                            addDebugLog("[RETRY] $reason → 60秒後にリトライ")
+                            withContext(Dispatchers.Main) {
+                                statusBar.text = "$reason (60秒後にリトライ)"
+                            }
+                            handler.postDelayed(self, 60_000)
+                        }
+                    } catch (e: Exception) {
+                        addDebugLog("[RETRY] 例外: ${e.message}")
+                        handler.postDelayed(self, 60_000)
+                    }
+                }
+            }
+        }
+        handler.postDelayed(retryRunnable, 60_000)
     }
 
     private fun startPolling() {
