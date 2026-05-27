@@ -1,6 +1,7 @@
 package jp.co.tisa.signage_android.data
 
 import android.util.Base64
+import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -11,15 +12,23 @@ import javax.crypto.spec.SecretKeySpec
  *
  * 暗号化仕様:
  * - アルゴリズム: AES-256-CBC
- * - 鍵: 32文字（256bit）の共通鍵
+ * - 鍵の元文字列: ENCRYPTION_KEY_SOURCE
+ * - 鍵の導出: SHA-256(元文字列) → 32バイトの鍵
  * - IV: 暗号文の先頭16バイトに付与
+ * - パディング: PKCS7 (= PKCS5Padding in Java)
  * - 出力形式: Base64エンコード文字列
  */
 object CryptoUtils {
 
-    // サーバーと共通の暗号化鍵（32文字 = 256bit）
-    // 本番運用前に変更すること
-    private const val ENCRYPTION_KEY = "s1gn4g3_2024_AES_k3y_!@#\$5678xx"
+    // サーバーと共通の暗号化鍵の元文字列
+    // SHA-256でハッシュしてから256bit鍵として使用
+    private const val ENCRYPTION_KEY_SOURCE = "s1gn4g3_2024_AES_k3y_!@#\$5678xxxx"
+
+    // SHA-256で導出した鍵（遅延初期化）
+    private val keyBytes: ByteArray by lazy {
+        MessageDigest.getInstance("SHA-256")
+            .digest(ENCRYPTION_KEY_SOURCE.toByteArray(Charsets.UTF_8))
+    }
 
     /**
      * AES-256-CBCで暗号化されたBase64文字列を復号する。
@@ -32,9 +41,9 @@ object CryptoUtils {
                 // IV(16) + 最低1バイトの暗号文が必要
                 return encryptedBase64
             }
-            val iv = data.sliceArray(0..15)
-            val cipherText = data.sliceArray(16 until data.size)
-            val keySpec = SecretKeySpec(ENCRYPTION_KEY.toByteArray(Charsets.UTF_8), "AES")
+            val iv = data.copyOfRange(0, 16)
+            val cipherText = data.copyOfRange(16, data.size)
+            val keySpec = SecretKeySpec(keyBytes, "AES")
             val ivSpec = IvParameterSpec(iv)
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)

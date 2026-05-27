@@ -1,6 +1,6 @@
 {
-  "version_code": 29,
-  "version_name": "1.29",
+  "version_code": 30,
+  "version_name": "1.30",
   "url": "/api/player/update/download",
   "force": false
 }
