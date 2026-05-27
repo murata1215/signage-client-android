@@ -122,15 +122,18 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val config = configManager.getConfig() ?: run {
+            addDebugLog("[INIT] config NULL → finish")
             finish()
             return
         }
+        addDebugLog("[INIT] config OK: ${config.serverUrl}")
         serverClient = ServerClient(config)
         scheduleManager = ScheduleManager(configManager, serverClient)
         pdfCacheManager = PdfCacheManager(this, serverClient)
         smbPdfManager = SmbPdfManager(this)
 
         // Start playback
+        addDebugLog("[INIT] startPlayback 開始")
         coroutineScope.launch {
             startPlayback()
         }
@@ -570,28 +573,40 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
 
     private suspend fun startPlayback() {
+        addDebugLog("[PLAY] スケジュール取得中...")
         val schedule = scheduleManager.loadSchedule()
         if (schedule == null) {
+            addDebugLog("[PLAY] スケジュール取得失敗 → standby")
             showStandby()
             return
         }
+
+        val types = schedule.playlist.groupBy { it.type }.mapValues { it.value.size }
+        addDebugLog("[PLAY] スケジュール取得OK: ${schedule.playlist.size}件 $types")
 
         pdfCacheManager.downloadAll(schedule.playlist)
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
         pdfCacheManager.cleanupUnused(activeIds)
 
         if (!scheduleManager.isWithinPlayTime()) {
+            addDebugLog("[PLAY] 再生時間外 (${schedule.playStartTime}-${schedule.playEndTime}) → standby")
             showStandby()
             startTimeCheck()
             return
         }
 
+        addDebugLog("[PLAY] 再生開始")
         playCurrentContent()
         startPolling()
     }
 
     private fun playCurrentContent() {
-        val item = scheduleManager.getCurrentItem() ?: return
+        val item = scheduleManager.getCurrentItem() ?: run {
+            addDebugLog("[PLAY] getCurrentItem=null")
+            return
+        }
+
+        addDebugLog("[PLAY] #${item.displayOrder} type=${item.type} name=${item.name}")
 
         // pdf_folder タイプの場合は専用フローへ
         if (item.type == "pdf_folder") {
@@ -766,6 +781,7 @@ class PlayerActivity : ComponentActivity() {
 
         // pdf_folderサブプレイリスト内の場合: 次の子PDFへ
         if (pdfFolderSubPlaylist != null) {
+            addDebugLog("[PLAY] advance: sub ${pdfFolderSubIndex+1}/${pdfFolderSubPlaylist?.size}")
             pdfFolderSubIndex++
             contentTimer?.let { handler.removeCallbacks(it) }
             countdownTimer?.let { handler.removeCallbacks(it) }
