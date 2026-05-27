@@ -9,6 +9,7 @@ Linux版 (Electron) の Android 移植版。
 - **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
 - **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止
+- **PDFデュアルページ表示** - A4縦PDFを自動検出し見開き2ページ表示 (allPages: 同一PDF内 / firstPageOnly: 異なるPDF同士)
 - **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
 - **スケジュールポーリング** - version ベースの差分検知、コンテンツ切替時にも更新チェック

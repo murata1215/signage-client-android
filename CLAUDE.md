@@ -13,6 +13,7 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **WebViewベース**: コンテンツ表示はWebView x3 (active+next+prev 3枚ローテーション切替)
 - **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避)
 - **PDF 2キャンバススワップ**: ページ切替時のちらつき防止(canvas A/B交互表示)
+- **PDFデュアルページ**: A4縦PDFを自動判定し見開き表示(allPages: 同一PDF内2ページ並べ / firstPageOnly: 異なるPDFの1ページ目同士を並べ)
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
 - **SMB PDFフォルダ**: type=pdf_folder でWindows共有フォルダからPDFを自動取得・ローテーション表示
 - **自動アップデート**: ACTION_VIEW Intent方式でOTA更新 (1分間隔チェック、白い画面で確認→完了後「開く」ボタン)
@@ -63,6 +64,7 @@ jp.co.tisa.signage_android/
 - PDF表示はBase64注入方式 (file://間のCORS制約回避)
 - PDF 2キャンバススワップ方式 (canvas A/B交互表示でページ切替時のちらつき完全防止)
 - PDF allPagesモード: ページ送りはpdf-viewer.html内setTimeoutチェーン管理、完了時onAllPagesCompleted()でAndroidに通知
+- PDF デュアルページ自動判定: 1ページ目のviewport height>widthで縦長検出、allPagesは同一PDF内見開き、firstPageOnlyは異なるPDFの1ページ目同士をloadDualFirstPages()で見開き
 - WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
 - PdfJsInterface にWebView参照を持たせ、activeWebViewからの通知のみステータスバー更新(先読みWebViewの干渉防止)
 - type=pdf_folder はサブプレイリスト方式で統合 (メインプレイリスト内にpdf_folderアイテム → 同期画面 → 子PDFサブループ → メイン次アイテムへ)
