@@ -31,7 +31,8 @@ data class PlaylistItem(
     @SerializedName("smb_path") val smbPath: String? = null,
     @SerializedName("smb_username") val smbUsername: String? = null,
     @SerializedName("smb_password") val smbPassword: String? = null,
-    @SerializedName("first_page_only") val firstPageOnly: Boolean? = null
+    @SerializedName("first_page_only") val firstPageOnly: Boolean? = null,
+    @Transient val isPortrait: Boolean = false  // ローカル専用: 縦長PDF判定(APIには含まれない)
 )
 
 data class UpdateInfo(

@@ -71,9 +71,10 @@
                 currentPage = 1;
 
                 // 1ページ目のアスペクト比で縦長判定
+                // firstPageOnlyモードではデュアル無効（Android側で別PDFを並べる）
                 const firstPage = await pdfDoc.getPage(1);
                 const vp = firstPage.getViewport({ scale: 1 });
-                dualPageMode = (vp.height > vp.width) && totalPages >= 2;
+                dualPageMode = !firstPageOnlyMode && (vp.height > vp.width) && totalPages >= 2;
                 pageStep = dualPageMode ? 2 : 1;
 
                 await renderCurrentPages();
@@ -266,6 +267,97 @@
             } catch (err) {
                 console.error('Base64 decode error:', err);
             }
+        };
+
+        /**
+         * 2つのPDFの1ページ目を左右に並べて表示する（firstPageOnly + 縦長PDF用）。
+         * Android側から2つのBase64文字列を渡す。
+         */
+        window.loadDualFirstPages = function(base64Left, base64Right) {
+            stopPageTimer();
+            firstPageOnlyMode = true;
+            dualPageMode = false;
+            (async () => {
+                try {
+                    if (isRendering) return;
+                    isRendering = true;
+
+                    function decodeBase64(b64) {
+                        const bin = atob(b64);
+                        const bytes = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        return bytes.buffer;
+                    }
+
+                    const leftDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Left) }).promise;
+                    const rightDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Right) }).promise;
+                    const leftPage = await leftDoc.getPage(1);
+                    const rightPage = await rightDoc.getPage(1);
+
+                    const containerWidth = window.innerWidth;
+                    const containerHeight = window.innerHeight;
+                    const gap = 8;
+
+                    const leftVp = leftPage.getViewport({ scale: 1 });
+                    const rightVp = rightPage.getViewport({ scale: 1 });
+
+                    // Use the taller page's aspect ratio for scaling
+                    const maxHeight = Math.max(leftVp.height, rightVp.height);
+                    const maxWidth = Math.max(leftVp.width, rightVp.width);
+                    const totalNaturalWidth = maxWidth * 2 + gap;
+
+                    const scaleX = containerWidth / totalNaturalWidth;
+                    const scaleY = containerHeight / maxHeight;
+                    const scale = Math.min(scaleX, scaleY);
+
+                    const pageW = Math.floor(maxWidth * scale);
+                    const pageH = Math.floor(maxHeight * scale);
+                    const scaledGap = Math.floor(gap * scale);
+                    const canvasW = pageW * 2 + scaledGap;
+
+                    backCanvas.width = canvasW;
+                    backCanvas.height = pageH;
+                    const ctx = backCanvas.getContext('2d');
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(0, 0, canvasW, pageH);
+
+                    // Left page
+                    const leftScaled = leftPage.getViewport({ scale: scale });
+                    const leftOff = document.createElement('canvas');
+                    leftOff.width = Math.floor(leftScaled.width);
+                    leftOff.height = Math.floor(leftScaled.height);
+                    await leftPage.render({ canvasContext: leftOff.getContext('2d'), viewport: leftScaled }).promise;
+                    const leftX = Math.floor((pageW - leftOff.width) / 2);
+                    const leftY = Math.floor((pageH - leftOff.height) / 2);
+                    ctx.drawImage(leftOff, leftX, leftY);
+
+                    // Right page
+                    const rightScaled = rightPage.getViewport({ scale: scale });
+                    const rightOff = document.createElement('canvas');
+                    rightOff.width = Math.floor(rightScaled.width);
+                    rightOff.height = Math.floor(rightScaled.height);
+                    await rightPage.render({ canvasContext: rightOff.getContext('2d'), viewport: rightScaled }).promise;
+                    const rightX = pageW + scaledGap + Math.floor((pageW - rightOff.width) / 2);
+                    const rightY = Math.floor((pageH - rightOff.height) / 2);
+                    ctx.drawImage(rightOff, rightX, rightY);
+
+                    swapCanvases();
+
+                    // Clean up
+                    leftDoc.destroy();
+                    rightDoc.destroy();
+
+                    totalPages = 2;
+                    currentPage = 1;
+                    if (window.SignageInterface) {
+                        window.SignageInterface.onPageChanged(1, 2);
+                    }
+                } catch (err) {
+                    console.error('Dual first pages error:', err);
+                } finally {
+                    isRendering = false;
+                }
+            })();
         };
 
         window.stopPdf = function() {

@@ -37,7 +37,8 @@ class SmbPdfManager(private val context: Context) {
         val filename: String,
         val lastModified: Long,
         val fileSize: Long,
-        val pageCount: Int
+        val pageCount: Int,
+        val isPortrait: Boolean = false  // 縦長PDF判定
     )
 
     private data class ParsedUncPath(
@@ -166,14 +167,15 @@ class SmbPdfManager(private val context: Context) {
 
                     downloadFile(share, parsed.path, rf.filename, localFile)
 
-                    val pageCount = countPdfPages(localFile)
+                    val pdfInfo = analyzePdf(localFile)
 
                     newEntries.add(
                         SmbCacheEntry(
                             filename = rf.filename,
                             lastModified = rf.lastModified,
                             fileSize = rf.fileSize,
-                            pageCount = pageCount
+                            pageCount = pdfInfo.pageCount,
+                            isPortrait = pdfInfo.isPortrait
                         )
                     )
                 } else {
@@ -283,17 +285,25 @@ class SmbPdfManager(private val context: Context) {
     // PDF page counting
     // =====================================================================
 
-    private fun countPdfPages(file: File): Int {
+    data class PdfInfo(val pageCount: Int, val isPortrait: Boolean)
+
+    private fun analyzePdf(file: File): PdfInfo {
         return try {
             val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
             val renderer = PdfRenderer(fd)
             val count = renderer.pageCount
+            val isPortrait = if (count > 0) {
+                val page = renderer.openPage(0)
+                val portrait = page.height > page.width
+                page.close()
+                portrait
+            } else false
             renderer.close()
             fd.close()
-            count
+            PdfInfo(count, isPortrait)
         } catch (e: Exception) {
             e.printStackTrace()
-            1
+            PdfInfo(1, false)
         }
     }
 
@@ -367,7 +377,8 @@ class SmbPdfManager(private val context: Context) {
                     smbPath = null,
                     smbUsername = null,
                     smbPassword = null,
-                    firstPageOnly = isFirstPageOnly
+                    firstPageOnly = isFirstPageOnly,
+                    isPortrait = entry.isPortrait
                 )
             )
         }

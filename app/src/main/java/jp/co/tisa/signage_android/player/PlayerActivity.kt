@@ -761,6 +761,34 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val subItem = subList[pdfFolderSubIndex]
+        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+
+        // firstPageOnly + 縦長PDF + 次のPDFがある場合: 2つのPDFの1ページ目を見開き表示
+        if (isFirstPageOnly && subItem.isPortrait && pdfFolderSubIndex + 1 < subList.size) {
+            val nextSubItem = subList[pdfFolderSubIndex + 1]
+            if (nextSubItem.isPortrait) {
+                // デュアル表示: 2つのPDFを同時ロード
+                isPlaying = true
+                isPaused = false
+                disableWebViewInteraction()
+                loadDualPdfContent(activeWebView!!, subItem, nextSubItem)
+                updateStatusBar(subItem) // 左側のPDF名をステータスバーに表示
+
+                contentTimer?.let { handler.removeCallbacks(it) }
+                val duration = (subItem.durationSeconds * 1000).toLong()
+                contentTimer = Runnable {
+                    // 2つ分進める
+                    pdfFolderSubIndex += 2
+                    contentTimer?.let { handler.removeCallbacks(it) }
+                    countdownTimer?.let { handler.removeCallbacks(it) }
+                    handler.post { playNextSubPdf() }
+                }.also {
+                    handler.postDelayed(it, duration)
+                }
+                return
+            }
+        }
+
         isPlaying = true
         isPaused = false
         disableWebViewInteraction()
@@ -915,6 +943,56 @@ class PlayerActivity : ComponentActivity() {
 
     private fun loadContent(webView: WebView, item: PlaylistItem) {
         loadContentInternal(webView, item, preloadType = null)
+    }
+
+    /**
+     * 2つのPDFの1ページ目を左右に並べて表示する（firstPageOnly + 縦長PDF見開き表示）。
+     */
+    private fun loadDualPdfContent(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+        webView.setInitialScale(100)
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("pdf-viewer.html") == true) {
+                    loadDualPdfIntoViewer(webView, leftItem, rightItem)
+                }
+            }
+        }
+        webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
+    }
+
+    private fun loadDualPdfIntoViewer(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId)
+                val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId)
+
+                val leftBytes = leftFile?.takeIf { it.exists() }?.readBytes()
+                val rightBytes = rightFile?.takeIf { it.exists() }?.readBytes()
+
+                if (leftBytes != null && rightBytes != null) {
+                    val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                    val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
+                    withContext(Dispatchers.Main) {
+                        webView.evaluateJavascript(
+                            "loadDualFirstPages('$leftBase64', '$rightBase64');",
+                            null
+                        )
+                    }
+                } else if (leftBytes != null) {
+                    // 右側がない場合はシングル表示にフォールバック
+                    val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                    withContext(Dispatchers.Main) {
+                        webView.evaluateJavascript(
+                            "loadPdfBase64('$base64', 10, true);",
+                            null
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     private fun preloadContent(webView: WebView, item: PlaylistItem, isPrevPreload: Boolean) {
