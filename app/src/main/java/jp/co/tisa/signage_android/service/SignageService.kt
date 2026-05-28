@@ -133,17 +133,21 @@ class SignageService : Service() {
 
                 // スケジュール更新チェック
                 try {
+                    sendUpdateLog("[SCHEDULE] チェック開始")
                     val schedule = client.fetchSchedule()
                     if (schedule != null) {
                         val cachedVersion = configManager.getCachedVersion()
                         if (schedule.version != cachedVersion) {
+                            sendUpdateLog("[SCHEDULE] 更新あり → 更新実施中 (v${cachedVersion} → v${schedule.version})")
                             configManager.cacheSchedule(schedule)
-                            sendUpdateLog("[SCHEDULE] スケジュール更新検知: v${cachedVersion} → v${schedule.version}")
                             sendBroadcast(Intent(ACTION_SCHEDULE_UPDATED))
+                            sendUpdateLog("[SCHEDULE] 更新完了")
+                        } else {
+                            sendUpdateLog("[SCHEDULE] 更新なし (v${schedule.version})")
                         }
                     }
                 } catch (e: Exception) {
-                    // スケジュール取得失敗は無視
+                    sendUpdateLog("[SCHEDULE] チェック失敗: ${e.message}")
                 }
 
                 delay(UPDATE_CHECK_INTERVAL_MS)
