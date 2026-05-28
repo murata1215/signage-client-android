@@ -1068,6 +1068,21 @@ class PlayerActivity : ComponentActivity() {
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
 
+        // 再生時間外チェック
+        if (!scheduleManager.isWithinPlayTime()) {
+            addDebugLog("[PLAY] 再生時間外になった → standby")
+            contentTimer?.let { handler.removeCallbacks(it) }
+            countdownTimer?.let { handler.removeCallbacks(it) }
+            isPlaying = false
+            pdfFolderSubPlaylist = null
+            pdfFolderSubIndex = 0
+            currentPdfFolderItem = null
+            statusBar.text = "再生時間外 (${scheduleManager.playTimeRange})"
+            showStandby()
+            startTimeCheck()
+            return
+        }
+
         // pdf_folderサブプレイリスト内の場合: WebViewスワップ方式で次の子PDFへ
         if (pdfFolderSubPlaylist != null) {
             addDebugLog("[PLAY] advance: sub ${pdfFolderSubIndex+1}/${pdfFolderSubPlaylist?.size}")

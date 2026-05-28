@@ -20,6 +20,9 @@ class ScheduleManager(
     val version: Int
         get() = currentSchedule?.version ?: -1
 
+    val playTimeRange: String
+        get() = "${currentSchedule?.playStartTime ?: "?"}-${currentSchedule?.playEndTime ?: "?"}"
+
     suspend fun loadSchedule(): ScheduleResponse? {
         // Try server first
         val schedule = serverClient.fetchSchedule()
