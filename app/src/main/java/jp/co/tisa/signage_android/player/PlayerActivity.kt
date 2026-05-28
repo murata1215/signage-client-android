@@ -80,6 +80,7 @@ class PlayerActivity : ComponentActivity() {
     private var isPaused = false
     private var nextReady = false
     private var prevReady = false
+    private var subNextReady = false  // サブプレイリスト先読み完了フラグ
 
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
@@ -745,6 +746,7 @@ class PlayerActivity : ComponentActivity() {
     private fun startSubPlaylist(subPlaylist: List<PlaylistItem>) {
         pdfFolderSubPlaylist = subPlaylist
         pdfFolderSubIndex = 0
+        subNextReady = false
         playNextSubPdf()
     }
 
@@ -777,14 +779,13 @@ class PlayerActivity : ComponentActivity() {
                 contentTimer?.let { handler.removeCallbacks(it) }
                 val duration = (subItem.durationSeconds * 1000).toLong()
                 contentTimer = Runnable {
-                    // 2つ分進める
-                    pdfFolderSubIndex += 2
                     contentTimer?.let { handler.removeCallbacks(it) }
                     countdownTimer?.let { handler.removeCallbacks(it) }
-                    handler.post { playNextSubPdf() }
+                    handler.post { advanceToNextSubPdf() }
                 }.also {
                     handler.postDelayed(it, duration)
                 }
+                preloadNextSubPdf()
                 return
             }
         }
@@ -816,6 +817,165 @@ class PlayerActivity : ComponentActivity() {
                 handler.postDelayed(it, duration)
             }
         }
+        preloadNextSubPdf()
+    }
+
+    /** 次のサブPDFインデックスを計算（デュアル表示の場合は+2） */
+    private fun calculateNextSubIndex(): Int {
+        val subList = pdfFolderSubPlaylist ?: return 0
+        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+        val current = pdfFolderSubIndex
+        val currentItem = subList.getOrNull(current) ?: return current + 1
+
+        if (isFirstPageOnly && currentItem.isPortrait
+            && current + 1 < subList.size && subList[current + 1].isPortrait) {
+            return current + 2
+        }
+        return current + 1
+    }
+
+    /** 次のサブPDFをnextWebViewに先読み */
+    private fun preloadNextSubPdf() {
+        val subList = pdfFolderSubPlaylist ?: return
+        subNextReady = false
+
+        val nextIdx = calculateNextSubIndex()
+        if (nextIdx >= subList.size) {
+            subNextReady = true  // 最後のPDF → 先読み不要
+            return
+        }
+
+        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+        val nextItem = subList[nextIdx]
+
+        // デュアル表示判定
+        if (isFirstPageOnly && nextItem.isPortrait
+            && nextIdx + 1 < subList.size && subList[nextIdx + 1].isPortrait) {
+            loadDualPdfContentForPreload(nextWebView!!, nextItem, subList[nextIdx + 1])
+        } else {
+            // シングル表示
+            loadSubPdfPreload(nextWebView!!, nextItem)
+        }
+    }
+
+    /** サブPDF先読み用: nextWebViewにPDFをロード */
+    private fun loadSubPdfPreload(webView: WebView, item: PlaylistItem) {
+        webView.setInitialScale(100)
+        val cachedFile = smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
+        val duration = item.pdfPageDuration ?: 10
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("pdf-viewer.html") == true) {
+                    loadPdfIntoViewerForSubPreload(webView, cachedFile, item, duration)
+                }
+            }
+        }
+        webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
+    }
+
+    /** サブPDF先読み用: Base64注入して完了時にsubNextReady=true */
+    private fun loadPdfIntoViewerForSubPreload(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val pdfBytes = if (cachedFile.exists()) cachedFile.readBytes() else null
+                if (pdfBytes != null) {
+                    val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
+                    val firstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+                    withContext(Dispatchers.Main) {
+                        webView.evaluateJavascript(
+                            "loadPdfBase64('$base64', $duration, $firstPageOnly);", null
+                        )
+                        subNextReady = true
+                        addDebugLog("[SMB] サブPDF先読み完了: ${item.name}")
+                    }
+                } else {
+                    withContext(Dispatchers.Main) { subNextReady = true }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) { subNextReady = true }
+            }
+        }
+    }
+
+    /** デュアルPDF先読み用: 2つのPDFの1ページ目を左右に並べてnextWebViewにロード */
+    private fun loadDualPdfContentForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+        webView.setInitialScale(100)
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("pdf-viewer.html") == true) {
+                    loadDualPdfIntoViewerForPreload(webView, leftItem, rightItem)
+                }
+            }
+        }
+        webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
+    }
+
+    /** デュアルPDF先読み用: Base64注入して完了時にsubNextReady=true */
+    private fun loadDualPdfIntoViewerForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId)
+                val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId)
+                val leftBytes = leftFile?.takeIf { it.exists() }?.readBytes()
+                val rightBytes = rightFile?.takeIf { it.exists() }?.readBytes()
+
+                withContext(Dispatchers.Main) {
+                    if (leftBytes != null && rightBytes != null) {
+                        val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                        val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
+                        webView.evaluateJavascript(
+                            "loadDualFirstPages('$leftBase64', '$rightBase64');", null
+                        )
+                    } else if (leftBytes != null) {
+                        val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                        webView.evaluateJavascript(
+                            "loadPdfBase64('$base64', 10, true);", null
+                        )
+                    }
+                    subNextReady = true
+                    addDebugLog("[SMB] デュアルPDF先読み完了: ${leftItem.name}")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                handler.post { subNextReady = true }
+            }
+        }
+    }
+
+    /** サブプレイリスト: WebViewスワップで次のPDFへ遷移 */
+    private fun advanceToNextSubPdf() {
+        if (!subNextReady) {
+            // 先読みがまだ完了していない場合は200msごとにリトライ
+            handler.postDelayed({ advanceToNextSubPdf() }, 200)
+            return
+        }
+
+        // 次のインデックスを計算
+        val nextIdx = calculateNextSubIndex()
+
+        // WebViewスワップ（2枚版）
+        val oldActive = activeWebView
+        activeWebView = nextWebView
+        nextWebView = oldActive
+
+        // クロスフェード
+        activeWebView?.apply {
+            alpha = 0f
+            visibility = View.VISIBLE
+            animate().alpha(1f).setDuration(800).start()
+        }
+        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+            oldActive.visibility = View.INVISIBLE
+        }?.start()
+
+        // インデックスを進める
+        pdfFolderSubIndex = nextIdx
+
+        // 進めた結果、サブプレイリスト終了チェック含めて再生
+        playNextSubPdf()
     }
 
     // =========================================================================
@@ -825,13 +985,12 @@ class PlayerActivity : ComponentActivity() {
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
 
-        // pdf_folderサブプレイリスト内の場合: 次の子PDFへ
+        // pdf_folderサブプレイリスト内の場合: WebViewスワップ方式で次の子PDFへ
         if (pdfFolderSubPlaylist != null) {
             addDebugLog("[PLAY] advance: sub ${pdfFolderSubIndex+1}/${pdfFolderSubPlaylist?.size}")
-            pdfFolderSubIndex++
             contentTimer?.let { handler.removeCallbacks(it) }
             countdownTimer?.let { handler.removeCallbacks(it) }
-            handler.post { playNextSubPdf() }
+            handler.post { advanceToNextSubPdf() }
             return
         }
 
