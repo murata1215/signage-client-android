@@ -916,7 +916,7 @@ class PlayerActivity : ComponentActivity() {
         webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
     }
 
-    /** サブPDF先読み用: Base64注入して完了時にsubNextReady=true */
+    /** サブPDF先読み用: Base64注入（subNextReadyはPDF.jsレンダリング完了時にonPageChangedでセット） */
     private fun loadPdfIntoViewerForSubPreload(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int) {
         coroutineScope.launch(Dispatchers.IO) {
             try {
@@ -928,8 +928,8 @@ class PlayerActivity : ComponentActivity() {
                         webView.evaluateJavascript(
                             "loadPdfBase64('$base64', $duration, $firstPageOnly);", null
                         )
-                        subNextReady = true
-                        addDebugLog("[SMB] サブPDF先読み完了: ${item.name}")
+                        // subNextReadyはセットしない → PDF.jsのonPageChangedコールバックで完了通知
+                        addDebugLog("[SMB] サブPDF Base64注入完了: ${item.name}")
                     }
                 } else {
                     withContext(Dispatchers.Main) { subNextReady = true }
@@ -955,7 +955,7 @@ class PlayerActivity : ComponentActivity() {
         webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
     }
 
-    /** デュアルPDF先読み用: Base64注入して完了時にsubNextReady=true */
+    /** デュアルPDF先読み用: Base64注入（subNextReadyはPDF.jsレンダリング完了時にonPageChangedでセット） */
     private fun loadDualPdfIntoViewerForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
         coroutineScope.launch(Dispatchers.IO) {
             try {
@@ -976,9 +976,12 @@ class PlayerActivity : ComponentActivity() {
                         webView.evaluateJavascript(
                             "loadPdfBase64('$base64', 10, true);", null
                         )
+                    } else {
+                        // ファイルなし → フォールバック
+                        subNextReady = true
                     }
-                    subNextReady = true
-                    addDebugLog("[SMB] デュアルPDF先読み完了: ${leftItem.name}")
+                    // subNextReadyはセットしない → PDF.jsのonPageChangedコールバックで完了通知
+                    addDebugLog("[SMB] デュアルPDF Base64注入完了: ${leftItem.name}")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -1483,6 +1486,13 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
+                // サブPDF先読みWebViewからのレンダリング完了通知
+                if (webView != activeWebView && pdfFolderSubPlaylist != null && !subNextReady) {
+                    subNextReady = true
+                    addDebugLog("[SMB] サブPDF先読みレンダリング完了 (page $current/$total)")
+                    return@post
+                }
+
                 if (webView != activeWebView) return@post
 
                 currentPdfPage = current
