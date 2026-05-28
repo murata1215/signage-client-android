@@ -28,6 +28,7 @@ class SignageService : Service() {
         private const val TAG = "SignageService"
         private const val UPDATE_CHECK_INTERVAL_MS = 60_000L // 1 minute
         const val ACTION_UPDATE_LOG = "jp.co.tisa.signage_android.UPDATE_LOG"
+        const val ACTION_SCHEDULE_UPDATED = "jp.co.tisa.signage_android.SCHEDULE_UPDATED"
         const val EXTRA_LOG_MESSAGE = "log_message"
     }
 
@@ -129,6 +130,22 @@ class SignageService : Service() {
                 } catch (e: Exception) {
                     sendUpdateLog("チェック失敗: ${e.message}")
                 }
+
+                // スケジュール更新チェック
+                try {
+                    val schedule = client.fetchSchedule()
+                    if (schedule != null) {
+                        val cachedVersion = configManager.getCachedVersion()
+                        if (schedule.version != cachedVersion) {
+                            configManager.cacheSchedule(schedule)
+                            sendUpdateLog("[SCHEDULE] スケジュール更新検知: v${cachedVersion} → v${schedule.version}")
+                            sendBroadcast(Intent(ACTION_SCHEDULE_UPDATED))
+                        }
+                    }
+                } catch (e: Exception) {
+                    // スケジュール取得失敗は無視
+                }
+
                 delay(UPDATE_CHECK_INTERVAL_MS)
             }
         }

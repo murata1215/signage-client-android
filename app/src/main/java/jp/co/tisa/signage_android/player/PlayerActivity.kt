@@ -96,6 +96,34 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // BroadcastReceiver for schedule updates from SignageService
+    private val scheduleUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            addDebugLog("[SCHEDULE] Broadcast受信: スケジュール更新")
+            coroutineScope.launch {
+                val schedule = scheduleManager.loadSchedule()
+                if (schedule != null && schedule.playlist.isNotEmpty()) {
+                    val items = scheduleManager.playlist
+                    pdfCacheManager.downloadAll(items)
+                    val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
+                    pdfCacheManager.cleanupUnused(activeIds)
+                    handler.post {
+                        addDebugLog("[SCHEDULE] スケジュール反映完了: ${items.size}件")
+                        if (isPlaying) {
+                            // 再生中: 次の切替時に新スケジュールが反映される
+                        } else {
+                            // standby中: 再生時間内なら再生開始
+                            if (scheduleManager.isWithinPlayTime()) {
+                                addDebugLog("[SCHEDULE] 再生時間内 → 再生開始")
+                                playCurrentContent()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -114,12 +142,15 @@ class PlayerActivity : ComponentActivity() {
         // Initialize managers
         configManager = ConfigManager(this)
 
-        // Register broadcast receiver for update logs
-        val filter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
+        // Register broadcast receivers
+        val updateLogFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
+        val scheduleFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_SCHEDULE_UPDATED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateLogReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(updateLogReceiver, updateLogFilter, Context.RECEIVER_EXPORTED)
+            registerReceiver(scheduleUpdateReceiver, scheduleFilter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(updateLogReceiver, filter)
+            registerReceiver(updateLogReceiver, updateLogFilter)
+            registerReceiver(scheduleUpdateReceiver, scheduleFilter)
         }
 
         val config = configManager.getConfig() ?: run {
@@ -614,7 +645,6 @@ class PlayerActivity : ComponentActivity() {
 
         addDebugLog("[PLAY] 再生開始")
         playCurrentContent()
-        startPolling()
     }
 
     private fun playCurrentContent() {
@@ -1092,17 +1122,8 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
-        // 通常のメインプレイリスト進行
-        coroutineScope.launch {
-            val updated = scheduleManager.checkForUpdate()
-            if (updated) {
-                val items = scheduleManager.playlist
-                pdfCacheManager.downloadAll(items)
-                val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
-                pdfCacheManager.cleanupUnused(activeIds)
-            }
-            handler.post { doAdvance() }
-        }
+        // 通常のメインプレイリスト進行（スケジュール更新はSignageServiceが管理）
+        handler.post { doAdvance() }
     }
 
     /** メインプレイリストを強制的に次のアイテムへ進める（pdf_folder完了時等） */
@@ -1343,22 +1364,12 @@ class PlayerActivity : ComponentActivity() {
     private fun startTimeCheck() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                val self = this
-                coroutineScope.launch {
-                    // 再生時間外でもスケジュールを定期取得（再生時間変更に対応）
-                    try {
-                        scheduleManager.checkForUpdate()
-                    } catch (e: Exception) {
-                        addDebugLog("[TIME] スケジュール取得エラー: ${e.message}")
-                    }
-
-                    if (scheduleManager.isWithinPlayTime()) {
-                        addDebugLog("[TIME] 再生時間内になった → 再生開始")
-                        playCurrentContent()
-                        startPolling()
-                    } else {
-                        handler.postDelayed(self, 60_000)
-                    }
+                // スケジュール更新はSignageServiceが管理、ここでは再生時間のみチェック
+                if (scheduleManager.isWithinPlayTime()) {
+                    addDebugLog("[TIME] 再生時間内になった → 再生開始")
+                    playCurrentContent()
+                } else {
+                    handler.postDelayed(this, 60_000)
                 }
             }
         }, 60_000)
@@ -1392,23 +1403,6 @@ class PlayerActivity : ComponentActivity() {
             }
         }
         handler.postDelayed(retryRunnable, 60_000)
-    }
-
-    private fun startPolling() {
-        pollingJob?.cancel()
-        pollingJob = coroutineScope.launch {
-            while (isActive) {
-                delay((configManager.getPollingInterval() * 1000).toLong())
-                val updated = scheduleManager.checkForUpdate()
-                if (updated) {
-                    val items = scheduleManager.playlist
-                    pdfCacheManager.downloadAll(items)
-                    val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
-                    pdfCacheManager.cleanupUnused(activeIds)
-                    playCurrentContent()
-                }
-            }
-        }
     }
 
     // =========================================================================
@@ -1487,6 +1481,7 @@ class PlayerActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(updateLogReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(scheduleUpdateReceiver) } catch (_: Exception) {}
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
