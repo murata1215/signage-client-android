@@ -974,8 +974,47 @@ class PlayerActivity : ComponentActivity() {
         // インデックスを進める
         pdfFolderSubIndex = nextIdx
 
-        // 進めた結果、サブプレイリスト終了チェック含めて再生
-        playNextSubPdf()
+        // 先読み済みWebViewが表示されている → ロードせずタイマーだけ開始
+        playCurrentSubPdfAfterSwap()
+    }
+
+    /** スワップ後のサブPDF再生: ロードは行わず、タイマー+ステータスバー+先読みのみ */
+    private fun playCurrentSubPdfAfterSwap() {
+        val subList = pdfFolderSubPlaylist ?: return
+        if (pdfFolderSubIndex >= subList.size) {
+            // 全子PDF完了 → メインプレイリストの次へ
+            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
+            pdfFolderSubPlaylist = null
+            pdfFolderSubIndex = 0
+            currentPdfFolderItem = null
+            advanceToNextMain()
+            return
+        }
+
+        val subItem = subList[pdfFolderSubIndex]
+        isPlaying = true
+        isPaused = false
+        disableWebViewInteraction()
+        // ★ loadContent()は呼ばない（先読み済みのWebViewがそのまま表示されている）
+        updateStatusBar(subItem)
+
+        // タイマー設定
+        contentTimer?.let { handler.removeCallbacks(it) }
+        val isSubAllPages = subItem.pdfPageDuration != null
+        if (isSubAllPages) {
+            // allPages: onAllPagesCompletedで切替、安全弁タイマー
+            val safetyDuration = ((subItem.durationSeconds + 30) * 1000).toLong()
+            contentTimer = Runnable {
+                addDebugLog("[PDF] 安全弁タイマー発火")
+                advanceToNext()
+            }.also { handler.postDelayed(it, safetyDuration) }
+        } else {
+            // firstPageOnly: duration_seconds秒後に次へ
+            val duration = (subItem.durationSeconds * 1000).toLong()
+            contentTimer = Runnable { advanceToNext() }
+                .also { handler.postDelayed(it, duration) }
+        }
+        preloadNextSubPdf()
     }
 
     // =========================================================================
