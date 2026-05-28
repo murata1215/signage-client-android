@@ -1343,13 +1343,22 @@ class PlayerActivity : ComponentActivity() {
     private fun startTimeCheck() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (scheduleManager.isWithinPlayTime()) {
-                    coroutineScope.launch {
+                val self = this
+                coroutineScope.launch {
+                    // 再生時間外でもスケジュールを定期取得（再生時間変更に対応）
+                    try {
+                        scheduleManager.checkForUpdate()
+                    } catch (e: Exception) {
+                        addDebugLog("[TIME] スケジュール取得エラー: ${e.message}")
+                    }
+
+                    if (scheduleManager.isWithinPlayTime()) {
+                        addDebugLog("[TIME] 再生時間内になった → 再生開始")
                         playCurrentContent()
                         startPolling()
+                    } else {
+                        handler.postDelayed(self, 60_000)
                     }
-                } else {
-                    handler.postDelayed(this, 60_000)
                 }
             }
         }, 60_000)
