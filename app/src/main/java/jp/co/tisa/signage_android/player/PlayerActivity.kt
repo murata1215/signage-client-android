@@ -511,14 +511,13 @@ class PlayerActivity : ComponentActivity() {
         }
         containerLayout.addView(statusBar)
 
-        // Debug overlay: 1/4 screen, top-right
+        // Debug overlay: half-width, full-height, top-right
         val displayMetrics = resources.displayMetrics
-        val quarterWidth = displayMetrics.widthPixels / 2
-        val quarterHeight = displayMetrics.heightPixels / 2
+        val halfWidth = displayMetrics.widthPixels / 2
         debugTextView = TextView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
-                quarterWidth,
-                quarterHeight
+                halfWidth,
+                FrameLayout.LayoutParams.MATCH_PARENT
             ).apply {
                 gravity = android.view.Gravity.TOP or android.view.Gravity.END
             }
