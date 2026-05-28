@@ -747,7 +747,49 @@ class PlayerActivity : ComponentActivity() {
         pdfFolderSubPlaylist = subPlaylist
         pdfFolderSubIndex = 0
         subNextReady = false
-        playNextSubPdf()
+
+        val subItem = subPlaylist[0]
+        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+
+        // 1件目をnextWebViewに先読み（activeWebViewはsync画面を表示中）
+        if (isFirstPageOnly && subItem.isPortrait
+            && subPlaylist.size > 1 && subPlaylist[1].isPortrait) {
+            loadDualPdfContentForPreload(nextWebView!!, subItem, subPlaylist[1])
+        } else {
+            loadSubPdfPreload(nextWebView!!, subItem)
+        }
+
+        addDebugLog("[SMB] 1件目PDF先読み開始")
+        // 先読み完了を待ってWebViewスワップ → 即表示
+        waitAndSwapFirstSubPdf()
+    }
+
+    /** 1件目のサブPDF先読み完了を待ち、WebViewスワップで即表示 */
+    private fun waitAndSwapFirstSubPdf() {
+        if (!subNextReady) {
+            handler.postDelayed({ waitAndSwapFirstSubPdf() }, 200)
+            return
+        }
+
+        addDebugLog("[SMB] 1件目PDF先読み完了 → スワップ表示")
+
+        // WebViewスワップ（sync画面 → 先読み済みPDF）
+        val oldActive = activeWebView
+        activeWebView = nextWebView
+        nextWebView = oldActive
+
+        // クロスフェード
+        activeWebView?.apply {
+            alpha = 0f
+            visibility = View.VISIBLE
+            animate().alpha(1f).setDuration(800).start()
+        }
+        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+            oldActive.visibility = View.INVISIBLE
+        }?.start()
+
+        // タイマー開始 + 2件目先読み
+        playCurrentSubPdfAfterSwap()
     }
 
     private fun playNextSubPdf() {
