@@ -64,7 +64,7 @@
                 firstPageOnlyMode = !!firstPageOnly;
                 const loadingTask = pdfjsLib.getDocument({
                     data: data,
-                    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                    cMapUrl: 'file:///android_asset/pdfjs/cmaps/',
                     cMapPacked: true
                 });
                 pdfDoc = await loadingTask.promise;
@@ -299,7 +299,7 @@
                     }
 
                     const cmapOpts = {
-                        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                        cMapUrl: 'file:///android_asset/pdfjs/cmaps/',
                         cMapPacked: true
                     };
                     const leftDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Left), ...cmapOpts }).promise;
