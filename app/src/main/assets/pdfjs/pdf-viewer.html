@@ -62,7 +62,11 @@
         async function loadPdfFromData(data, firstPageOnly) {
             try {
                 firstPageOnlyMode = !!firstPageOnly;
-                const loadingTask = pdfjsLib.getDocument({ data: data });
+                const loadingTask = pdfjsLib.getDocument({
+                    data: data,
+                    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                    cMapPacked: true
+                });
                 pdfDoc = await loadingTask.promise;
                 totalPages = pdfDoc.numPages;
                 currentPage = 1;
@@ -294,8 +298,12 @@
                         return bytes.buffer;
                     }
 
-                    const leftDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Left) }).promise;
-                    const rightDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Right) }).promise;
+                    const cmapOpts = {
+                        cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                        cMapPacked: true
+                    };
+                    const leftDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Left), ...cmapOpts }).promise;
+                    const rightDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Right), ...cmapOpts }).promise;
                     const leftPage = await leftDoc.getPage(1);
                     const rightPage = await rightDoc.getPage(1);
 
