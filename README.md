@@ -8,11 +8,13 @@ Linux版 (Electron) の Android 移植版。
 
 - **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
-- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止
+- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止、devicePixelRatio対応高解像度レンダリング、CMapローカルバンドルで日本語CIDフォント対応
 - **PDFデュアルページ表示** - A4縦PDFを自動検出し見開き2ページ表示 (allPages: 同一PDF内 / firstPageOnly: 異なるPDF同士)
 - **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
-- **スケジュールポーリング** - version ベースの差分検知、コンテンツ切替時にも更新チェック
+- **サブプレイリスト先読み** - pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示 (onPageChangedでレンダリング完了検知)
+- **スケジュール更新** - SignageServiceが60秒間隔でスケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
+- **再生時間外自動停止** - コンテンツ切替時に再生時間チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュールリトライ** - 取得失敗/コンテンツなし時は60秒間隔でリトライ
 - **ハートビート送信** - Foreground Service で定期送信 (管理画面の稼働監視用)
 - **リモコン操作** - DPAD左右で前後移動、決定で一時停止/再開
@@ -25,7 +27,7 @@ Linux版 (Electron) の Android 移植版。
 - **ステータスバー** - コンテンツ名 + カウントダウン表示
 - **一時停止モード** - WebView操作可能 (リモコンでリンク選択・クリック)、枠色で状態表示
 - **自動アップデート** - サーバーからAPKを取得しIntent方式でOTA更新 (確認画面→完了後「開く」ボタン)
-- **デバッグオーバーレイ** - 画面右上にキー押下・アップデートログをリアルタイム表示 (KEYCODE 93でON/OFF)
+- **デバッグオーバーレイ** - 画面右半分×縦いっぱいにキー押下・アップデート・スケジュールログをリアルタイム表示 (KEYCODE 93でON/OFF)
 - **リモコンキーログ** - F1-F4, VOL+/-, CH上下, 未知のキーをデバッグウインドウに記録
 
 ## 動作環境
@@ -42,7 +44,7 @@ Linux版 (Electron) の Android 移植版。
 | UI (セットアップ) | Jetpack Compose + Material3 |
 | UI (コンテンツ表示) | WebView x3 (active+next+prev交互切替) |
 | 自動アップデート | ACTION_VIEW Intent方式 (Session APIはフォールバック用に残存) |
-| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 + 2キャンバススワップ |
+| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 + 2キャンバススワップ + CMapローカルバンドル |
 | SMB接続 | smbj 0.13.0 (純Java SMB2/3クライアント) |
 | 暗号化 | AES-256-CBC (SMBパスワード復号) |
 | HTTP通信 | OkHttp 4.x (プロキシ対応) |
@@ -74,7 +76,7 @@ jp.co.tisa.signage_android/
 │   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
 │   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ管理
 ├── service/
-│   ├── SignageService.kt     # Foreground Service (ハートビート + アップデートチェック)
+│   ├── SignageService.kt     # Foreground Service (ハートビート + アップデート + スケジュール更新チェック)
 │   ├── AppUpdateManager.kt   # OTA自動アップデート (PackageInstaller Session)
 │   ├── InstallResultReceiver.kt # インストール結果受信
 │   └── BootReceiver.kt      # BOOT_COMPLETED 自動起動
@@ -128,11 +130,12 @@ jp.co.tisa.signage_android/
         │   ├── 時間帯内 → ローテーション再生開始
         │   └── 時間帯外 → 待機画面
         ├── ハートビート送信ループ
-        ├── バックグラウンドポーリング (コンテンツ切替時にも更新チェック)
+        ├── SignageService がスケジュール+APK更新チェック (60秒間隔)
+        │   └── 更新あり → Broadcast → PlayerActivityがスケジュール反映
         └── type=pdf_folder 再生時
-            ├── SMB同期画面表示
+            ├── SMB同期画面表示 + 1件目PDFを裏で先読み
             ├── フォルダスキャン → 差分ダウンロード
-            ├── 子PDFサブプレイリスト再生
+            ├── 子PDFサブプレイリスト再生 (WebViewスワップ方式で即表示)
             └── 全子PDF完了 → メインプレイリスト次アイテムへ
 
 再生中の設定変更
@@ -146,10 +149,14 @@ jp.co.tisa.signage_android/
 
 ```
 SignageService (1分間隔)
-  -> GET /api/player/update/check?key=...
-  -> サーバー versionCode > アプリ versionCode ?
-    -> YES: APKダウンロード -> Intent方式でインストール (確認画面→完了後「開く」)
-    -> NO: 何もしない
+  ├── APKアップデートチェック
+  │   -> GET /api/player/update/check?key=...
+  │   -> サーバー versionCode > アプリ versionCode ?
+  │     -> YES: APKダウンロード -> Intent方式でインストール (確認画面→完了後「開く」)
+  │     -> NO: 何もしない
+  └── スケジュール更新チェック
+      -> GET /api/player/schedule?key=...
+      -> version が変更されていれば Broadcast で PlayerActivity に通知
 
 release/
 ├── signage-android-debug.apk    # 最新APK
