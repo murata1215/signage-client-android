@@ -1251,6 +1251,18 @@ class PlayerActivity : ComponentActivity() {
         // 次のインデックスを計算
         val nextIdx = calculateNextSubIndex()
 
+        // 最終サブPDF完了 → スワップせず直接メインPL進行
+        // (preloadPdfFolderがnextWebViewに次のフォルダを先読み済みの場合、
+        //  ここでスワップするとadvanceToNextMainで再スワップされて元に戻ってしまう)
+        if (nextIdx >= (pdfFolderSubPlaylist?.size ?: 0)) {
+            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
+            pdfFolderSubPlaylist = null
+            pdfFolderSubIndex = 0
+            currentPdfFolderItem = null
+            advanceToNextMain()
+            return
+        }
+
         // WebViewスワップ（2枚版）
         val oldActive = activeWebView
         activeWebView = nextWebView
