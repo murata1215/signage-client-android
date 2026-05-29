@@ -82,3 +82,13 @@ jp.co.tisa.signage_android/
 - DS-STBRC03リモコンのキーマッピング: F1-F4はKEYCODE_F1-F4ではなく端末固有コード(F4=KEYCODE_TV_INPUT=178等)
 - dispatchKeyEvent でリモコンキーをView階層より先に捕捉
 - setInitialScale(100) + loadWithOverviewMode=false でズーム固定
+
+## Release Checklist
+コード変更をリリースする際は、以下を**必ず全て**実行すること：
+
+1. **バージョン更新**: `app/build.gradle.kts` の `versionCode` と `versionName` をインクリメント
+2. **ビルド**: `./gradlew assembleDebug`
+3. **release/version.json 更新**: `version_code` と `version_name` を build.gradle.kts と同じ値に
+4. **APKコピー**: `cp app/build/outputs/apk/debug/app-debug.apk release/signage-android-debug.apk`
+5. **コミット**: コード変更 + release/ フォルダの両方を含めて `git add` → `git commit`
+6. **プッシュ**: `git push`
