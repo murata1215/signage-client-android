@@ -757,6 +757,7 @@ class PlayerActivity : ComponentActivity() {
         }
 
         addDebugLog("[PLAY] #${item.displayOrder} type=${item.type} name=${item.name}")
+        if (debugPage == 2) updateDebugContent()
 
         // pdf_folder タイプの場合は専用フローへ
         if (item.type == "pdf_folder") {
@@ -937,6 +938,7 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val subItem = subList[pdfFolderSubIndex]
+        if (debugPage == 2) updateDebugContent()
         val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
 
         // firstPageOnly + 縦長PDF + 次のPDFがある場合: 2つのPDFの1ページ目を見開き表示
@@ -1177,6 +1179,7 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val subItem = subList[pdfFolderSubIndex]
+        if (debugPage == 2) updateDebugContent()
         isPlaying = true
         isPaused = false
         disableWebViewInteraction()
