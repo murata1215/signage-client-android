@@ -920,7 +920,14 @@ class PlayerActivity : ComponentActivity() {
 
         val nextIdx = calculateNextSubIndex()
         if (nextIdx >= subList.size) {
-            subNextReady = true  // 最後のPDF → 先読み不要
+            subNextReady = true  // 最後のPDF → サブPDF先読み不要
+            // 次のメインアイテムがpdf_folderなら先読み開始（nextWebViewは空いている）
+            scheduleManager.getNextItem()?.let { nextMainItem ->
+                if (nextMainItem.type == "pdf_folder") {
+                    addDebugLog("[SMB] サブPL最終 → 次のpdf_folder先読み開始: ${nextMainItem.name}")
+                    preloadPdfFolder(nextMainItem)
+                }
+            }
             return
         }
 
@@ -1140,7 +1147,41 @@ class PlayerActivity : ComponentActivity() {
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
         scheduleManager.advanceToNext()
-        playCurrentContent()
+        val item = scheduleManager.getCurrentItem()
+
+        // 先読み済みpdf_folderなら即スワップ表示
+        if (item != null && item.type == "pdf_folder") {
+            val preloadedSub = preloadedPdfFolderSubPlaylist
+            if (preloadedSub != null && preloadedSub.isNotEmpty() && nextReady) {
+                addDebugLog("[SMB] pdf_folder先読み済み → 即表示 (${preloadedSub.size}件)")
+
+                // nextWebViewに先読みPDFが入っているのでスワップ
+                val oldActive = activeWebView
+                activeWebView = nextWebView
+                nextWebView = oldActive
+
+                // クロスフェード
+                activeWebView?.apply {
+                    alpha = 0f
+                    visibility = View.VISIBLE
+                    animate().alpha(1f).setDuration(800).start()
+                }
+                oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
+                    oldActive.visibility = View.INVISIBLE
+                }?.start()
+
+                currentPdfFolderItem = preloadedPdfFolderItem ?: item
+                pdfFolderSubPlaylist = preloadedSub
+                pdfFolderSubIndex = 0
+                preloadedPdfFolderSubPlaylist = null
+                preloadedPdfFolderItem = null
+                nextReady = false
+                playCurrentSubPdfAfterSwap()
+                return
+            }
+        }
+
+        playCurrentContent()  // 従来フロー（先読み未完了 or 非pdf_folder）
     }
 
     private fun preloadBothDirections() {
