@@ -11,12 +11,13 @@ Android版サイネージクライアント。サーバー(signage-server)から
 
 ## Architecture
 - **WebViewベース**: コンテンツ表示はWebView x3 (active+next+prev 3枚ローテーション切替)
-- **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN) + Base64データ注入(CORS回避) + CMapローカルバンドル(日本語CIDフォント対応)
+- **PDF表示**: assets内のpdf-viewer.html + PDF.js 3.x (CDN + Web Worker有効) + Base64データ注入(CORS回避) + CMapローカルバンドル(日本語CIDフォント対応)
 - **PDF 2キャンバススワップ**: ページ切替時のちらつき防止(canvas A/B交互表示)
 - **PDFデュアルページ**: A4縦PDFを自動判定し見開き表示(allPages: 同一PDF内2ページ並べ / firstPageOnly: 異なるPDFの1ページ目同士を並べ)
 - **PDF高解像度レンダリング**: devicePixelRatio対応でシャープ表示(canvas解像度=物理ピクセル、CSS表示=論理ピクセル)
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
 - **サブプレイリスト先読み**: pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示(1件目は同期画面の裏で先読み)
+- **pdf_folder先読み**: Webページ/サブPL表示中にバックグラウンドでSMB同期+1件目PDFレンダリング完了(Web→folder, folder→folder共に即切替)
 - **SMB PDFフォルダ**: type=pdf_folder でWindows共有フォルダからPDFを自動取得・ローテーション表示
 - **再生時間外自動停止**: コンテンツ切替時にisWithinPlayTime()チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュール更新一元化**: SignageServiceが60秒間隔でAPK+スケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
@@ -24,7 +25,7 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
 - **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
-- **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字でキー押下・アップデート・スケジュールログ表示 (KEYCODE 93でON/OFF)
+- **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字で3ページ表示 (KEYCODE 93でサイクル: 1.デバッグログ → 2.スケジュール情報 → 3.端末/ネットワーク情報 → 消去)
 - **ターゲット端末**: DS-ASTBX5 (Android STB)
 
 ## Package Structure
@@ -82,6 +83,12 @@ jp.co.tisa.signage_android/
 - DS-STBRC03リモコンのキーマッピング: F1-F4はKEYCODE_F1-F4ではなく端末固有コード(F4=KEYCODE_TV_INPUT=178等)
 - dispatchKeyEvent でリモコンキーをView階層より先に捕捉
 - setInitialScale(100) + loadWithOverviewMode=false でズーム固定
+- PDF.js Web Worker有効化 (CDNからpdf.worker.min.jsロード) + デュアルPDF読み込み/レンダリングをPromise.allで並列化
+- pdf_folder先読み: preloadPdfFolder()でWebページ表示中にSMB同期+PDF先読み完了、doAdvance()/advanceToNextMain()で即スワップ
+- サブPL最終PDF時にpreloadNextSubPdf()から次メインpdf_folderを先読み(folder→folder即切替)
+- advanceToNextSubPdf()で最終サブPDF検出時はWebViewスワップせず直接advanceToNextMain()へ(ダブルスワップ防止)
+- デバッグオーバーレイ3ページ: debugPage(0-3)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新
+- SignageServiceからACTION_HEARTBEAT Broadcast送信、PlayerActivityで受信して最終HB時刻記録
 
 ## Release Checklist
 コード変更をリリースする際は、以下を**必ず全て**実行すること：

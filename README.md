@@ -8,11 +8,12 @@ Linux版 (Electron) の Android 移植版。
 
 - **セットアップ画面** - サーバーURL + Client Key 入力、接続テスト、設定変更・初期化対応
 - **Webコンテンツ表示** - WebView でURL表示
-- **PDFコンテンツ表示** - PDF.js (Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止、devicePixelRatio対応高解像度レンダリング、CMapローカルバンドルで日本語CIDフォント対応
+- **PDFコンテンツ表示** - PDF.js (Web Worker有効 + Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止、devicePixelRatio対応高解像度レンダリング、CMapローカルバンドルで日本語CIDフォント対応、デュアルPDF並列ロード/レンダリング
 - **PDFデュアルページ表示** - A4縦PDFを自動検出し見開き2ページ表示 (allPages: 同一PDF内 / firstPageOnly: 異なるPDF同士)
 - **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
 - **サブプレイリスト先読み** - pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示 (onPageChangedでレンダリング完了検知)
+- **pdf_folder先読み** - Webページ/サブPL表示中にバックグラウンドでSMB同期+1件目PDFレンダリング完了 (Web→folder, folder→folder共に即切替、「更新中」画面なし)
 - **スケジュール更新** - SignageServiceが60秒間隔でスケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
 - **再生時間外自動停止** - コンテンツ切替時に再生時間チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュールリトライ** - 取得失敗/コンテンツなし時は60秒間隔でリトライ
@@ -27,7 +28,10 @@ Linux版 (Electron) の Android 移植版。
 - **ステータスバー** - コンテンツ名 + カウントダウン表示
 - **一時停止モード** - WebView操作可能 (リモコンでリンク選択・クリック)、枠色で状態表示
 - **自動アップデート** - サーバーからAPKを取得しIntent方式でOTA更新 (確認画面→完了後「開く」ボタン)
-- **デバッグオーバーレイ** - 画面右半分×縦いっぱいにキー押下・アップデート・スケジュールログをリアルタイム表示 (KEYCODE 93でON/OFF)
+- **デバッグオーバーレイ** - 画面右半分×縦いっぱいに3ページ表示 (KEYCODE 93でサイクル切替)
+  - ページ1: デバッグログ (リアルタイムログ)
+  - ページ2: スケジュール情報 (PL一覧+再生中マーカー自動追従)
+  - ページ3: 端末情報 (IP/サブネット/GW/MAC/プロキシ/ストレージ/メモリ/稼働時間/HB時刻)
 - **リモコンキーログ** - F1-F4, VOL+/-, CH上下, 未知のキーをデバッグウインドウに記録
 
 ## 動作環境
@@ -44,7 +48,7 @@ Linux版 (Electron) の Android 移植版。
 | UI (セットアップ) | Jetpack Compose + Material3 |
 | UI (コンテンツ表示) | WebView x3 (active+next+prev交互切替) |
 | 自動アップデート | ACTION_VIEW Intent方式 (Session APIはフォールバック用に残存) |
-| PDF表示 | PDF.js 3.x (CDN) + Base64データ注入 + 2キャンバススワップ + CMapローカルバンドル |
+| PDF表示 | PDF.js 3.x (CDN + Web Worker) + Base64データ注入 + 2キャンバススワップ + CMapローカルバンドル |
 | SMB接続 | smbj 0.13.0 (純Java SMB2/3クライアント) |
 | 暗号化 | AES-256-CBC (SMBパスワード復号) |
 | HTTP通信 | OkHttp 4.x (プロキシ対応) |
@@ -95,7 +99,7 @@ jp.co.tisa.signage_android/
 | 左 / CH- | 前のコンテンツ |
 | 決定 / ENTER | 一時停止/再開 |
 | 上 / 下 | 無効 (WebView操作を防止) |
-| KEYCODE 93 | デバッグオーバーレイ ON/OFF |
+| KEYCODE 93 | デバッグオーバーレイ切替 (ログ→スケジュール→端末情報→消去) |
 | F1-F4, VOL+/- | デバッグログに記録 |
 
 ### タッチ操作 (スマホ等)
@@ -133,9 +137,10 @@ jp.co.tisa.signage_android/
         ├── SignageService がスケジュール+APK更新チェック (60秒間隔)
         │   └── 更新あり → Broadcast → PlayerActivityがスケジュール反映
         └── type=pdf_folder 再生時
-            ├── SMB同期画面表示 + 1件目PDFを裏で先読み
-            ├── フォルダスキャン → 差分ダウンロード
+            ├── 前コンテンツ表示中にSMB同期+1件目PDF先読み完了 (preloadPdfFolder)
+            ├── 先読み完了済み → 即WebViewスワップ (「更新中」画面なし)
             ├── 子PDFサブプレイリスト再生 (WebViewスワップ方式で即表示)
+            ├── サブPL最終PDF表示中に次のpdf_folderを先読み (folder→folder即切替)
             └── 全子PDF完了 → メインプレイリスト次アイテムへ
 
 再生中の設定変更
