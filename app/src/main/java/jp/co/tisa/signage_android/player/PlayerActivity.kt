@@ -584,6 +584,10 @@ class PlayerActivity : ComponentActivity() {
                 domStorageEnabled = true
                 allowFileAccess = true
                 allowContentAccess = true
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true  // CMapファイル読み込み用
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 useWideViewPort = true
                 loadWithOverviewMode = false
