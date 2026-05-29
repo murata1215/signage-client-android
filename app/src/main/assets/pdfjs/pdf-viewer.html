@@ -25,9 +25,6 @@
             position: relative;
         }
         canvas {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
             position: absolute;
         }
         .hidden-canvas {
@@ -110,16 +107,21 @@
             const page = await pdfDoc.getPage(pageNum);
             const containerWidth = window.innerWidth;
             const containerHeight = window.innerHeight;
+            const dpr = window.devicePixelRatio || 1;
             const viewport = page.getViewport({ scale: 1 });
 
             const scaleX = containerWidth / viewport.width;
             const scaleY = containerHeight / viewport.height;
-            const scale = Math.min(scaleX, scaleY);
-            const scaledViewport = page.getViewport({ scale: scale });
+            const cssScale = Math.min(scaleX, scaleY);
+            const renderScale = cssScale * dpr;
+            const scaledViewport = page.getViewport({ scale: renderScale });
 
-            // Render to back canvas
+            // Render to back canvas at high resolution
             backCanvas.width = scaledViewport.width;
             backCanvas.height = scaledViewport.height;
+            // CSS size = actual display size
+            backCanvas.style.width = Math.floor(scaledViewport.width / dpr) + 'px';
+            backCanvas.style.height = Math.floor(scaledViewport.height / dpr) + 'px';
             const ctx = backCanvas.getContext('2d');
             await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
 
@@ -130,7 +132,8 @@
         async function renderDualPage(startPageNum) {
             const containerWidth = window.innerWidth;
             const containerHeight = window.innerHeight;
-            const gap = 8; // pixels between pages
+            const dpr = window.devicePixelRatio || 1;
+            const gap = 8; // CSS pixels between pages
 
             // Left page (always exists)
             const leftPage = await pdfDoc.getPage(startPageNum);
@@ -146,7 +149,7 @@
                 rightVp = rightPage.getViewport({ scale: 1 });
             }
 
-            // Calculate scale to fit both pages side by side
+            // Calculate CSS scale to fit both pages side by side
             const singlePageWidth = leftVp.width;
             const singlePageHeight = leftVp.height;
             const totalNaturalWidth = hasRightPage
@@ -155,23 +158,25 @@
 
             const scaleX = containerWidth / totalNaturalWidth;
             const scaleY = containerHeight / singlePageHeight;
-            const scale = Math.min(scaleX, scaleY);
+            const cssScale = Math.min(scaleX, scaleY);
+            const renderScale = cssScale * dpr;
 
-            const pageW = Math.floor(singlePageWidth * scale);
-            const pageH = Math.floor(singlePageHeight * scale);
-            const scaledGap = hasRightPage ? Math.floor(gap * scale) : 0;
+            const pageW = Math.floor(singlePageWidth * renderScale);
+            const pageH = Math.floor(singlePageHeight * renderScale);
+            const scaledGap = hasRightPage ? Math.floor(gap * renderScale) : 0;
             const canvasW = hasRightPage ? pageW * 2 + scaledGap : pageW;
 
-            // Setup back canvas
+            // Setup back canvas at high resolution
             backCanvas.width = canvasW;
             backCanvas.height = pageH;
+            backCanvas.style.width = Math.floor(canvasW / dpr) + 'px';
+            backCanvas.style.height = Math.floor(pageH / dpr) + 'px';
             const ctx = backCanvas.getContext('2d');
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvasW, pageH);
 
             // Render left page
-            const leftScaledVp = leftPage.getViewport({ scale: scale });
-            // Use offscreen canvas to render then draw
+            const leftScaledVp = leftPage.getViewport({ scale: renderScale });
             const leftOff = document.createElement('canvas');
             leftOff.width = pageW;
             leftOff.height = pageH;
@@ -183,7 +188,7 @@
 
             // Render right page (if exists)
             if (hasRightPage && rightPage) {
-                const rightScaledVp = rightPage.getViewport({ scale: scale });
+                const rightScaledVp = rightPage.getViewport({ scale: renderScale });
                 const rightOff = document.createElement('canvas');
                 rightOff.width = pageW;
                 rightOff.height = pageH;
@@ -296,7 +301,8 @@
 
                     const containerWidth = window.innerWidth;
                     const containerHeight = window.innerHeight;
-                    const gap = 8;
+                    const dpr = window.devicePixelRatio || 1;
+                    const gap = 8; // CSS pixels
 
                     const leftVp = leftPage.getViewport({ scale: 1 });
                     const rightVp = rightPage.getViewport({ scale: 1 });
@@ -308,21 +314,24 @@
 
                     const scaleX = containerWidth / totalNaturalWidth;
                     const scaleY = containerHeight / maxHeight;
-                    const scale = Math.min(scaleX, scaleY);
+                    const cssScale = Math.min(scaleX, scaleY);
+                    const renderScale = cssScale * dpr;
 
-                    const pageW = Math.floor(maxWidth * scale);
-                    const pageH = Math.floor(maxHeight * scale);
-                    const scaledGap = Math.floor(gap * scale);
+                    const pageW = Math.floor(maxWidth * renderScale);
+                    const pageH = Math.floor(maxHeight * renderScale);
+                    const scaledGap = Math.floor(gap * renderScale);
                     const canvasW = pageW * 2 + scaledGap;
 
                     backCanvas.width = canvasW;
                     backCanvas.height = pageH;
+                    backCanvas.style.width = Math.floor(canvasW / dpr) + 'px';
+                    backCanvas.style.height = Math.floor(pageH / dpr) + 'px';
                     const ctx = backCanvas.getContext('2d');
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvasW, pageH);
 
                     // Left page
-                    const leftScaled = leftPage.getViewport({ scale: scale });
+                    const leftScaled = leftPage.getViewport({ scale: renderScale });
                     const leftOff = document.createElement('canvas');
                     leftOff.width = Math.floor(leftScaled.width);
                     leftOff.height = Math.floor(leftScaled.height);
@@ -332,7 +341,7 @@
                     ctx.drawImage(leftOff, leftX, leftY);
 
                     // Right page
-                    const rightScaled = rightPage.getViewport({ scale: scale });
+                    const rightScaled = rightPage.getViewport({ scale: renderScale });
                     const rightOff = document.createElement('canvas');
                     rightOff.width = Math.floor(rightScaled.width);
                     rightOff.height = Math.floor(rightScaled.height);
