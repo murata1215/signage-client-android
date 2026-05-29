@@ -82,6 +82,10 @@ class PlayerActivity : ComponentActivity() {
     private var prevReady = false
     private var subNextReady = false  // サブプレイリスト先読み完了フラグ
 
+    // pdf_folder先読み（Webページ表示中にSMB同期+1件目PDFレンダリング）
+    private var preloadedPdfFolderSubPlaylist: List<PlaylistItem>? = null
+    private var preloadedPdfFolderItem: PlaylistItem? = null
+
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
     private var longPressResetRunnable: Runnable? = null
@@ -1146,7 +1150,7 @@ class PlayerActivity : ComponentActivity() {
             if (nextItem.type != "pdf_folder") {
                 preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
             } else {
-                nextReady = true // pdf_folderはプリロード不要
+                preloadPdfFolder(nextItem) // Webページ表示中にSMB同期+PDF先読み
             }
         }
         scheduleManager.getPreviousItem()?.let { prevItem ->
@@ -1154,6 +1158,54 @@ class PlayerActivity : ComponentActivity() {
                 preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
             } else {
                 prevReady = true
+            }
+        }
+    }
+
+    /** pdf_folder先読み: Webページ表示中にSMB同期+1件目PDFをnextWebViewにレンダリング */
+    private fun preloadPdfFolder(item: PlaylistItem) {
+        val manager = smbPdfManager ?: run {
+            nextReady = true
+            return
+        }
+        // nextReady = false のまま（先読み完了時にセット）
+        preloadedPdfFolderSubPlaylist = null
+        preloadedPdfFolderItem = item
+
+        addDebugLog("[SMB] pdf_folder先読み開始: ${item.name}")
+
+        coroutineScope.launch {
+            val (subPlaylist, _) = withContext(Dispatchers.IO) {
+                manager.syncFolder(item) { progressMsg ->
+                    withContext(Dispatchers.Main) {
+                        addDebugLog("[SMB] (先読み) $progressMsg")
+                    }
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                if (subPlaylist.isEmpty()) {
+                    addDebugLog("[SMB] pdf_folder先読み: ファイルなし")
+                    preloadedPdfFolderSubPlaylist = emptyList()
+                    nextReady = true
+                    return@withContext
+                }
+
+                // サブプレイリストを保存
+                preloadedPdfFolderSubPlaylist = subPlaylist
+                addDebugLog("[SMB] pdf_folder先読み: ${subPlaylist.size}件 → 1件目PDF先読み開始")
+
+                // 1件目PDFをnextWebViewに先読み
+                val subItem = subPlaylist[0]
+                val isFirstPageOnly = item.firstPageOnly == true
+
+                if (isFirstPageOnly && subItem.isPortrait
+                    && subPlaylist.size > 1 && subPlaylist[1].isPortrait) {
+                    loadDualPdfContentForPreload(nextWebView!!, subItem, subPlaylist[1])
+                } else {
+                    loadSubPdfPreload(nextWebView!!, subItem)
+                }
+                // レンダリング完了はonPageChangedコールバックでnextReady=trueにセット
             }
         }
     }
@@ -1189,9 +1241,23 @@ class PlayerActivity : ComponentActivity() {
         scheduleManager.advanceToNext()
         val item = scheduleManager.getCurrentItem() ?: return
 
-        // pdf_folder の場合は専用フローへ
+        // pdf_folder の場合: 先読み済みなら即サブPL開始、未完了なら従来フロー
         if (item.type == "pdf_folder") {
-            startPdfFolderPlayback(item)
+            val preloadedSub = preloadedPdfFolderSubPlaylist
+            if (preloadedSub != null && preloadedSub.isNotEmpty()) {
+                // 先読み完了済み → sync画面不要、即サブPL開始
+                addDebugLog("[SMB] pdf_folder先読み済み → 即表示 (${preloadedSub.size}件)")
+                currentPdfFolderItem = preloadedPdfFolderItem ?: item
+                pdfFolderSubPlaylist = preloadedSub
+                pdfFolderSubIndex = 0
+                preloadedPdfFolderSubPlaylist = null
+                preloadedPdfFolderItem = null
+                // activeWebViewには先読み済みPDFが表示されている（doAdvanceのスワップ済み）
+                playCurrentSubPdfAfterSwap()
+            } else {
+                // 先読み未完了 → 従来フロー
+                startPdfFolderPlayback(item)
+            }
             return
         }
 
@@ -1215,7 +1281,7 @@ class PlayerActivity : ComponentActivity() {
             if (nextItem.type != "pdf_folder") {
                 preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
             } else {
-                nextReady = true
+                preloadPdfFolder(nextItem) // Webページ表示中にSMB同期+PDF先読み
             }
         }
     }
@@ -1509,6 +1575,13 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
+                // pdf_folder先読み（preloadPdfFolder）: nextWebViewでのレンダリング完了
+                if (webView != activeWebView && preloadedPdfFolderSubPlaylist != null && !nextReady) {
+                    nextReady = true
+                    addDebugLog("[SMB] pdf_folder先読みレンダリング完了 (page $current/$total)")
+                    return@post
+                }
+
                 // サブPDF先読みWebViewからのレンダリング完了通知
                 if (webView != activeWebView && pdfFolderSubPlaylist != null && !subNextReady) {
                     subNextReady = true
