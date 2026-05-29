@@ -59,6 +59,8 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
     private var debugPage = 1  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報
+    private var lastHeartbeatTime: String? = null
+    private var lastScheduleUpdateTime: String? = null
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -99,9 +101,20 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // BroadcastReceiver for heartbeat from SignageService
+    private val heartbeatReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            lastHeartbeatTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            if (debugPage == 3) updateDebugContent()
+        }
+    }
+
     // BroadcastReceiver for schedule updates from SignageService
     private val scheduleUpdateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            lastScheduleUpdateTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
             addDebugLog("[SCHEDULE] Broadcast受信: スケジュール更新")
             coroutineScope.launch {
                 val schedule = scheduleManager.loadSchedule()
@@ -148,12 +161,15 @@ class PlayerActivity : ComponentActivity() {
         // Register broadcast receivers
         val updateLogFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
         val scheduleFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_SCHEDULE_UPDATED)
+        val heartbeatFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_HEARTBEAT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(updateLogReceiver, updateLogFilter, Context.RECEIVER_EXPORTED)
             registerReceiver(scheduleUpdateReceiver, scheduleFilter, Context.RECEIVER_EXPORTED)
+            registerReceiver(heartbeatReceiver, heartbeatFilter, Context.RECEIVER_EXPORTED)
         } else {
             registerReceiver(updateLogReceiver, updateLogFilter)
             registerReceiver(scheduleUpdateReceiver, scheduleFilter)
+            registerReceiver(heartbeatReceiver, heartbeatFilter)
         }
 
         val config = configManager.getConfig() ?: run {
@@ -276,6 +292,21 @@ class PlayerActivity : ComponentActivity() {
         sb.append("Android: API ${Build.VERSION.SDK_INT} (Android ${Build.VERSION.RELEASE})\n")
         sb.append("端末: ${Build.MANUFACTURER} / ${Build.MODEL}\n")
 
+        // ── ネットワーク情報 ──
+        sb.append("${"─".repeat(20)}\n")
+        try {
+            val netInfo = getNetworkInfo()
+            sb.append("IP: ${netInfo.ip}\n")
+            sb.append("サブネット: ${netInfo.subnet}\n")
+            sb.append("ゲートウェイ: ${netInfo.gateway}\n")
+            sb.append("MAC: ${netInfo.mac}\n")
+        } catch (_: Exception) {
+            sb.append("ネットワーク: 取得失敗\n")
+        }
+        sb.append("プロキシ: 210.175.128.100:8080\n")
+
+        // ── サーバー・画面 ──
+        sb.append("${"─".repeat(20)}\n")
         val config = configManager.getConfig()
         sb.append("サーバー: ${config?.serverUrl ?: "未設定"}\n")
         val key = config?.clientKey ?: "未設定"
@@ -290,9 +321,86 @@ class PlayerActivity : ComponentActivity() {
         val totalMB = runtime.maxMemory() / 1024 / 1024
         sb.append("メモリ: ${usedMB}MB / ${totalMB}MB\n")
 
-        sb.append("WebView active: ${activeWebView?.url ?: "null"}\n")
+        // ストレージ
+        try {
+            val stat = android.os.StatFs(filesDir.absolutePath)
+            val freeGB = stat.availableBytes / 1_073_741_824.0
+            val totalGB = stat.totalBytes / 1_073_741_824.0
+            val pct = if (totalGB > 0) (freeGB / totalGB * 100).toInt() else 0
+            sb.append("ストレージ: ${"%.1f".format(freeGB)}GB空き / ${"%.1f".format(totalGB)}GB (${pct}%)\n")
+        } catch (_: Exception) {
+            sb.append("ストレージ: 取得失敗\n")
+        }
+
+        // SMBキャッシュ件数
+        try {
+            val cacheDir = File(filesDir, "smb_pdf_cache")
+            val count = if (cacheDir.exists()) {
+                cacheDir.listFiles()?.sumOf { shareDir ->
+                    shareDir.listFiles()?.count { it.extension == "pdf" } ?: 0
+                } ?: 0
+            } else 0
+            sb.append("SMBキャッシュ: ${count}件\n")
+        } catch (_: Exception) {}
+
+        // 稼働時間
+        val uptimeMs = android.os.SystemClock.elapsedRealtime()
+        val days = uptimeMs / 86_400_000
+        val hours = (uptimeMs % 86_400_000) / 3_600_000
+        val mins = (uptimeMs % 3_600_000) / 60_000
+        val uptimeStr = if (days > 0) "${days}日 ${hours}時間 ${mins}分"
+        else "${hours}時間 ${mins}分"
+        sb.append("稼働時間: $uptimeStr\n")
+
+        // 最終ハートビート・スケジュール更新
+        sb.append("最終HB: ${lastHeartbeatTime ?: "未受信"}\n")
+        sb.append("最終スケジュール更新: ${lastScheduleUpdateTime ?: "未受信"}\n")
 
         return sb.toString().trimEnd()
+    }
+
+    private data class NetworkInfo(
+        val ip: String, val subnet: String, val gateway: String, val mac: String
+    )
+
+    private fun getNetworkInfo(): NetworkInfo {
+        var ip = "不明"
+        var subnet = "不明"
+        var mac = "不明"
+        var gateway = "不明"
+
+        try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+            for (ni in interfaces) {
+                if (ni.isLoopback || !ni.isUp) continue
+                // MACアドレス
+                ni.hardwareAddress?.let { hw ->
+                    mac = hw.joinToString(":") { "%02X".format(it) }
+                }
+                for (addr in ni.interfaceAddresses) {
+                    val inetAddr = addr.address
+                    if (inetAddr is java.net.Inet4Address) {
+                        ip = inetAddr.hostAddress ?: "不明"
+                        val prefixLen = addr.networkPrefixLength.toInt()
+                        val maskInt = if (prefixLen > 0) (-1 shl (32 - prefixLen)) else 0
+                        subnet = "${(maskInt shr 24) and 0xFF}.${(maskInt shr 16) and 0xFF}.${(maskInt shr 8) and 0xFF}.${maskInt and 0xFF} (/$prefixLen)"
+                    }
+                }
+                if (ip != "不明") break
+            }
+        } catch (_: Exception) {}
+
+        // ゲートウェイ
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val network = cm.activeNetwork
+            val lp = cm.getLinkProperties(network)
+            lp?.routes?.firstOrNull { it.isDefaultRoute }?.let { route ->
+                gateway = route.gateway?.hostAddress ?: "不明"
+            }
+        } catch (_: Exception) {}
+
+        return NetworkInfo(ip, subnet, gateway, mac)
     }
 
     // =========================================================================
@@ -1692,6 +1800,7 @@ class PlayerActivity : ComponentActivity() {
         super.onDestroy()
         try { unregisterReceiver(updateLogReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(scheduleUpdateReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(heartbeatReceiver) } catch (_: Exception) {}
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }

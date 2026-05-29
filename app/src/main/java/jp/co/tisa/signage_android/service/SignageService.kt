@@ -29,6 +29,7 @@ class SignageService : Service() {
         private const val UPDATE_CHECK_INTERVAL_MS = 60_000L // 1 minute
         const val ACTION_UPDATE_LOG = "jp.co.tisa.signage_android.UPDATE_LOG"
         const val ACTION_SCHEDULE_UPDATED = "jp.co.tisa.signage_android.SCHEDULE_UPDATED"
+        const val ACTION_HEARTBEAT = "jp.co.tisa.signage_android.HEARTBEAT"
         const val EXTRA_LOG_MESSAGE = "log_message"
     }
 
@@ -93,6 +94,7 @@ class SignageService : Service() {
             while (isActive) {
                 try {
                     client.sendHeartbeat()
+                    sendBroadcast(Intent(ACTION_HEARTBEAT))
                 } catch (e: Exception) {
                     // Ignore heartbeat failures
                 }
