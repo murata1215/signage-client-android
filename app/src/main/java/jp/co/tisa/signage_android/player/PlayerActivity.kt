@@ -58,8 +58,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
-    private var isDebugVisible = true
-    private val DEBUG_HEADER = "***デバッグウインドウ表示中 この画面はリモコンの下ボタン(V)で消えます***"
+    private var debugPage = 1  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -189,15 +188,111 @@ class PlayerActivity : ComponentActivity() {
         if (debugLines.size > 20) {
             debugLines.removeAt(0)
         }
-        debugTextView.text = DEBUG_HEADER + "\n" + debugLines.joinToString("\n")
+        if (debugPage == 1) {
+            updateDebugContent()
+        }
     }
 
-    private fun toggleDebugOverlay() {
-        isDebugVisible = !isDebugVisible
-        debugTextView.visibility = if (isDebugVisible) View.VISIBLE else View.GONE
-        if (isDebugVisible) {
-            addDebugLog("[DEBUG] overlay ON")
+    private fun cycleDebugPage() {
+        debugPage = (debugPage + 1) % 4  // 0→1→2→3→0
+        if (debugPage == 0) {
+            debugTextView.visibility = View.GONE
+        } else {
+            debugTextView.visibility = View.VISIBLE
+            updateDebugContent()
         }
+    }
+
+    private fun updateDebugContent() {
+        debugTextView.text = when (debugPage) {
+            1 -> buildDebugLogText()
+            2 -> buildScheduleInfoText()
+            3 -> buildDeviceInfoText()
+            else -> ""
+        }
+    }
+
+    private fun buildDebugLogText(): String {
+        val header = "[1/3] デバッグログ (下ボタンで切替)"
+        return header + "\n" + debugLines.joinToString("\n")
+    }
+
+    private fun buildScheduleInfoText(): String {
+        val sb = StringBuilder("[2/3] スケジュール情報 (下ボタンで切替)\n")
+        sb.append("バージョン: v${scheduleManager.version}\n")
+        sb.append("再生時間: ${scheduleManager.playTimeRange}\n")
+
+        val playlist = scheduleManager.playlist
+        sb.append("プレイリスト: ${playlist.size}件\n")
+
+        val currentItem = scheduleManager.getCurrentItem()
+        val subList = pdfFolderSubPlaylist
+        val subIdx = pdfFolderSubIndex
+
+        if (subList != null) {
+            sb.append("状態: サブPL再生中 (${subIdx + 1}/${subList.size})\n")
+        }
+
+        sb.append("─".repeat(20)).append("\n")
+
+        playlist.forEachIndexed { _, item ->
+            val prefix = if (item == currentItem) "▶ " else "  "
+            val typeTag = when (item.type) {
+                "web" -> "web"
+                "pdf" -> "pdf"
+                "pdf_folder" -> "folder"
+                else -> item.type
+            }
+            val dur = "${item.durationSeconds}秒"
+            sb.append("${prefix}#${item.displayOrder} [$typeTag] ${item.name} ($dur)\n")
+        }
+
+        if (subList != null && subList.isNotEmpty()) {
+            sb.append("\n[サブPL: ${currentPdfFolderItem?.name}]\n")
+            subList.forEachIndexed { idx, sub ->
+                val prefix = if (idx == subIdx) "▶ " else "  "
+                sb.append("${prefix}${idx + 1}. ${sub.name}\n")
+            }
+        }
+
+        return sb.toString().trimEnd()
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun buildDeviceInfoText(): String {
+        val sb = StringBuilder("[3/3] 端末情報 (下ボタンで切替)\n")
+
+        val pInfo = try {
+            packageManager.getPackageInfo(packageName, 0)
+        } catch (_: Exception) { null }
+        val versionName = pInfo?.versionName ?: "?"
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pInfo?.longVersionCode?.toString() ?: "?"
+        } else {
+            @Suppress("DEPRECATION")
+            pInfo?.versionCode?.toString() ?: "?"
+        }
+        sb.append("アプリ: v$versionName (code: $versionCode)\n")
+        sb.append("Android: API ${Build.VERSION.SDK_INT} (Android ${Build.VERSION.RELEASE})\n")
+        sb.append("端末: ${Build.MANUFACTURER} / ${Build.MODEL}\n")
+
+        val config = configManager.getConfig()
+        sb.append("サーバー: ${config?.serverUrl ?: "未設定"}\n")
+        val key = config?.clientKey ?: "未設定"
+        val keyDisplay = if (key.length > 16) key.take(16) + "..." else key
+        sb.append("クライアントキー: $keyDisplay\n")
+
+        val dm = resources.displayMetrics
+        sb.append("画面: ${dm.widthPixels}x${dm.heightPixels} (dpr: ${dm.density})\n")
+
+        val runtime = Runtime.getRuntime()
+        val usedMB = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+        val totalMB = runtime.maxMemory() / 1024 / 1024
+        sb.append("メモリ: ${usedMB}MB / ${totalMB}MB\n")
+
+        sb.append("WebView active: ${activeWebView?.url ?: "null"}\n")
+
+        return sb.toString().trimEnd()
     }
 
     // =========================================================================
@@ -254,9 +349,9 @@ class PlayerActivity : ComponentActivity() {
 
         val keyCode = event.keyCode
 
-        // KEYCODE_BOOKMARK=93 (DS-STBRC03 remote) toggles debug overlay
+        // KEYCODE_BOOKMARK=93 (DS-STBRC03 remote) cycles debug overlay pages
         if (keyCode == 93) {
-            toggleDebugOverlay()
+            cycleDebugPage()
             return true
         }
 
@@ -560,7 +655,7 @@ class PlayerActivity : ComponentActivity() {
             setTextColor(0xFF00FF00.toInt()) // Green text
             textSize = 13f
             setPadding(16, 12, 16, 12)
-            text = DEBUG_HEADER + "\n[UPDATE] 待機中..."
+            text = "[1/3] デバッグログ (下ボタンで切替)\n起動中..."
             isClickable = false
             isFocusable = false
             visibility = View.VISIBLE
