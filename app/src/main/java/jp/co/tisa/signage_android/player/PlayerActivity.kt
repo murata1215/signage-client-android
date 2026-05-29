@@ -997,17 +997,18 @@ class PlayerActivity : ComponentActivity() {
                 val leftBytes = leftFile?.takeIf { it.exists() }?.readBytes()
                 val rightBytes = rightFile?.takeIf { it.exists() }?.readBytes()
 
+                // Base64エンコードをIOスレッドで実行（Mainスレッド負荷軽減）
+                val leftBase64 = leftBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                val rightBase64 = rightBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+
                 withContext(Dispatchers.Main) {
-                    if (leftBytes != null && rightBytes != null) {
-                        val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
-                        val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
+                    if (leftBase64 != null && rightBase64 != null) {
                         webView.evaluateJavascript(
                             "loadDualFirstPages('$leftBase64', '$rightBase64');", null
                         )
-                    } else if (leftBytes != null) {
-                        val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                    } else if (leftBase64 != null) {
                         webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', 10, true);", null
+                            "loadPdfBase64('$leftBase64', 10, true);", null
                         )
                     } else {
                         // ファイルなし → フォールバック

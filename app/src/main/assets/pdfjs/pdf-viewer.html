@@ -40,7 +40,7 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         let pdfDoc = null;
         let currentPage = 1;
@@ -302,10 +302,14 @@
                         cMapUrl: 'file:///android_asset/pdfjs/cmaps/',
                         cMapPacked: true
                     };
-                    const leftDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Left), ...cmapOpts }).promise;
-                    const rightDoc = await pdfjsLib.getDocument({ data: decodeBase64(base64Right), ...cmapOpts }).promise;
-                    const leftPage = await leftDoc.getPage(1);
-                    const rightPage = await rightDoc.getPage(1);
+                    const [leftDoc, rightDoc] = await Promise.all([
+                        pdfjsLib.getDocument({ data: decodeBase64(base64Left), ...cmapOpts }).promise,
+                        pdfjsLib.getDocument({ data: decodeBase64(base64Right), ...cmapOpts }).promise
+                    ]);
+                    const [leftPage, rightPage] = await Promise.all([
+                        leftDoc.getPage(1),
+                        rightDoc.getPage(1)
+                    ]);
 
                     const containerWidth = window.innerWidth;
                     const containerHeight = window.innerHeight;
@@ -343,17 +347,23 @@
                     const leftOff = document.createElement('canvas');
                     leftOff.width = Math.floor(leftScaled.width);
                     leftOff.height = Math.floor(leftScaled.height);
-                    await leftPage.render({ canvasContext: leftOff.getContext('2d'), viewport: leftScaled }).promise;
-                    const leftX = Math.floor((pageW - leftOff.width) / 2);
-                    const leftY = Math.floor((pageH - leftOff.height) / 2);
-                    ctx.drawImage(leftOff, leftX, leftY);
 
                     // Right page
                     const rightScaled = rightPage.getViewport({ scale: renderScale });
                     const rightOff = document.createElement('canvas');
                     rightOff.width = Math.floor(rightScaled.width);
                     rightOff.height = Math.floor(rightScaled.height);
-                    await rightPage.render({ canvasContext: rightOff.getContext('2d'), viewport: rightScaled }).promise;
+
+                    // Render both pages in parallel
+                    await Promise.all([
+                        leftPage.render({ canvasContext: leftOff.getContext('2d'), viewport: leftScaled }).promise,
+                        rightPage.render({ canvasContext: rightOff.getContext('2d'), viewport: rightScaled }).promise
+                    ]);
+
+                    const leftX = Math.floor((pageW - leftOff.width) / 2);
+                    const leftY = Math.floor((pageH - leftOff.height) / 2);
+                    ctx.drawImage(leftOff, leftX, leftY);
+
                     const rightX = pageW + scaledGap + Math.floor((pageW - rightOff.width) / 2);
                     const rightY = Math.floor((pageH - rightOff.height) / 2);
                     ctx.drawImage(rightOff, rightX, rightY);
