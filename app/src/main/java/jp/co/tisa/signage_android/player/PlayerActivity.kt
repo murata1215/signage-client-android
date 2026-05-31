@@ -58,7 +58,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
-    private var debugPage = 1  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報
+    private var debugPage = 1  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
     private var lastHeartbeatTime: String? = null
     private var lastScheduleUpdateTime: String? = null
 
@@ -210,7 +210,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun cycleDebugPage() {
-        debugPage = (debugPage + 1) % 4  // 0→1→2→3→0
+        debugPage = (debugPage + 1) % 5  // 0→1→2→3→4→0
         if (debugPage == 0) {
             debugTextView.visibility = View.GONE
         } else {
@@ -224,17 +224,18 @@ class PlayerActivity : ComponentActivity() {
             1 -> buildDebugLogText()
             2 -> buildScheduleInfoText()
             3 -> buildDeviceInfoText()
+            4 -> buildNamingManualText()
             else -> ""
         }
     }
 
     private fun buildDebugLogText(): String {
-        val header = "[1/3] デバッグログ (下ボタンで切替)"
+        val header = "[1/4] デバッグログ (下ボタンで切替)"
         return header + "\n" + debugLines.joinToString("\n")
     }
 
     private fun buildScheduleInfoText(): String {
-        val sb = StringBuilder("[2/3] スケジュール情報 (下ボタンで切替)\n")
+        val sb = StringBuilder("[2/4] スケジュール情報 (下ボタンで切替)\n")
         sb.append("バージョン: v${scheduleManager.version}\n")
         sb.append("再生時間: ${scheduleManager.playTimeRange}\n")
 
@@ -276,7 +277,7 @@ class PlayerActivity : ComponentActivity() {
 
     @SuppressLint("SetTextI18n")
     private fun buildDeviceInfoText(): String {
-        val sb = StringBuilder("[3/3] 端末情報 (下ボタンで切替)\n")
+        val sb = StringBuilder("[3/4] 端末情報 (下ボタンで切替)\n")
 
         val pInfo = try {
             packageManager.getPackageInfo(packageName, 0)
@@ -357,6 +358,32 @@ class PlayerActivity : ComponentActivity() {
         sb.append("最終スケジュール更新: ${lastScheduleUpdateTime ?: "未受信"}\n")
 
         return sb.toString().trimEnd()
+    }
+
+    private fun buildNamingManualText(): String {
+        val sb = StringBuilder("[4/4] PDFフォルダ命名規約 (下ボタンで切替)\n")
+        sb.append("${"─".repeat(20)}\n")
+        sb.append("■ 書式:\n")
+        sb.append("  {順番}_{ページ}_{開始日}_{終了日}_{秒}_{説明}.pdf\n")
+        sb.append("\n")
+        sb.append("■ 例:\n")
+        sb.append("  001_0_20260501_20260531_30_書簡.pdf\n")
+        sb.append("  002_1_20260601_20261231_10_全頁資料.pdf\n")
+        sb.append("\n")
+        sb.append("■ フィールド:\n")
+        sb.append("  順番   : 表示順 (数値・小さい順)\n")
+        sb.append("  ページ : 0=先頭ページのみ / 1=全ページ\n")
+        sb.append("  開始日 : yyyyMMdd (表示開始日)\n")
+        sb.append("  終了日 : yyyyMMdd (表示終了日)\n")
+        sb.append("  秒     : 表示秒数\n")
+        sb.append("           (全ページ時は1頁あたりの秒数)\n")
+        sb.append("  説明   : 任意テキスト\n")
+        sb.append("\n")
+        sb.append("■ 注意:\n")
+        sb.append("  ・規約外ファイル名→デフォルト動作\n")
+        sb.append("  ・日付範囲外のファイルは非表示\n")
+        sb.append("  ・規約ファイルが先、規約外が後に表示")
+        return sb.toString()
     }
 
     private data class NetworkInfo(
@@ -763,7 +790,7 @@ class PlayerActivity : ComponentActivity() {
             setTextColor(0xFF00FF00.toInt()) // Green text
             textSize = 13f
             setPadding(16, 12, 16, 12)
-            text = "[1/3] デバッグログ (下ボタンで切替)\n起動中..."
+            text = "[1/4] デバッグログ (下ボタンで切替)\n起動中..."
             isClickable = false
             isFocusable = false
             visibility = View.VISIBLE

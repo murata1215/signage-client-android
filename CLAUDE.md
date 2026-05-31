@@ -25,7 +25,8 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
 - **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
-- **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字で3ページ表示 (KEYCODE 93でサイクル: 1.デバッグログ → 2.スケジュール情報 → 3.端末/ネットワーク情報 → 消去)
+- **SMB PDFフォルダ命名規約**: ファイル名で表示制御 ({順番}_{ページ制御}_{開始日}_{終了日}_{秒}_{説明}.pdf)、規約外ファイルはデフォルト動作
+- **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字で4ページ表示 (KEYCODE 93でサイクル: 1.デバッグログ → 2.スケジュール情報 → 3.端末/ネットワーク情報 → 4.PDFフォルダ命名マニュアル → 消去)
 - **ターゲット端末**: DS-ASTBX5 (Android STB)
 
 ## Package Structure
@@ -87,7 +88,8 @@ jp.co.tisa.signage_android/
 - pdf_folder先読み: preloadPdfFolder()でWebページ表示中にSMB同期+PDF先読み完了、doAdvance()/advanceToNextMain()で即スワップ
 - サブPL最終PDF時にpreloadNextSubPdf()から次メインpdf_folderを先読み(folder→folder即切替)
 - advanceToNextSubPdf()で最終サブPDF検出時はWebViewスワップせず直接advanceToNextMain()へ(ダブルスワップ防止)
-- デバッグオーバーレイ3ページ: debugPage(0-3)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新
+- SMB PDFフォルダ命名規約: parseFileNameConfig()でファイル名パース、規約ファイルはsortOrder順+日付フィルタ+個別firstPageOnly/duration、規約外は親アイテムのデフォルト設定で後方配置
+- デバッグオーバーレイ4ページ: debugPage(0-4)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新、ページ4は命名規約マニュアル(静的)
 - SignageServiceからACTION_HEARTBEAT Broadcast送信、PlayerActivityで受信して最終HB時刻記録
 
 ## Release Checklist

@@ -18,6 +18,8 @@ import jp.co.tisa.signage_android.data.CryptoUtils
 import jp.co.tisa.signage_android.data.PlaylistItem
 import java.io.File
 import java.io.FileOutputStream
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.util.EnumSet
 import java.util.concurrent.TimeUnit
 
@@ -331,6 +333,49 @@ class SmbPdfManager(private val context: Context) {
     }
 
     // =====================================================================
+    // Filename-based display control
+    // =====================================================================
+
+    /**
+     * ファイル名規約からパースした表示制御設定。
+     * 形式: {並び順}_{ページ制御}_{表示開始日}_{表示終了日}_{表示秒数}_{説明}.pdf
+     * 例: 001_0_20260501_20260531_30_書簡.pdf
+     */
+    private data class FileNameConfig(
+        val sortOrder: Int,          // 並び順（小さい順に表示）
+        val firstPageOnly: Boolean,  // true=先頭ページのみ(0), false=全ページ(1)
+        val startDate: LocalDate,    // 表示開始日
+        val endDate: LocalDate,      // 表示終了日
+        val durationSeconds: Int,    // 表示秒数（全ページ時は1ページあたり秒数）
+        val description: String      // 説明テキスト
+    )
+
+    private val fileNamePattern = Regex(
+        """^(\d+)_([01])_(\d{8})_(\d{8})_(\d+)_(.+)\.[pP][dD][fF]$"""
+    )
+    private val dateFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
+
+    /**
+     * ファイル名から表示制御設定をパースする。
+     * 規約に合わないファイル名の場合は null を返す。
+     */
+    private fun parseFileNameConfig(filename: String): FileNameConfig? {
+        val match = fileNamePattern.matchEntire(filename) ?: return null
+        return try {
+            FileNameConfig(
+                sortOrder = match.groupValues[1].toInt(),
+                firstPageOnly = match.groupValues[2] == "0",
+                startDate = LocalDate.parse(match.groupValues[3], dateFormatter),
+                endDate = LocalDate.parse(match.groupValues[4], dateFormatter),
+                durationSeconds = match.groupValues[5].toInt(),
+                description = match.groupValues[6]
+            )
+        } catch (e: Exception) {
+            null  // 日付パース失敗等は規約外として扱う
+        }
+    }
+
+    // =====================================================================
     // Playlist building
     // =====================================================================
 
@@ -344,13 +389,80 @@ class SmbPdfManager(private val context: Context) {
         pdfPageDuration: Int?
     ): List<PlaylistItem> {
         val items = mutableListOf<PlaylistItem>()
+        val today = LocalDate.now()
 
-        for ((index, entry) in entries.sortedBy { it.filename.lowercase() }.withIndex()) {
+        // エントリをファイル名規約パース成功/失敗に分離
+        data class ParsedEntry(val entry: SmbCacheEntry, val config: FileNameConfig)
+
+        val configuredEntries = mutableListOf<ParsedEntry>()
+        val defaultEntries = mutableListOf<SmbCacheEntry>()
+
+        for (entry in entries) {
+            val config = parseFileNameConfig(entry.filename)
+            if (config != null) {
+                // 日付範囲外のファイルはスキップ
+                if (today < config.startDate || today > config.endDate) continue
+                configuredEntries.add(ParsedEntry(entry, config))
+            } else {
+                defaultEntries.add(entry)
+            }
+        }
+
+        // ソート: 規約ファイルはsortOrder順、規約外はファイル名アルファベット順
+        val sortedConfigured = configuredEntries.sortedBy { it.config.sortOrder }
+        val sortedDefault = defaultEntries.sortedBy { it.filename.lowercase() }
+
+        var displayIndex = 0
+
+        // 規約ファイル: 個別の表示制御設定を適用
+        for (parsed_entry in sortedConfigured) {
+            val entry = parsed_entry.entry
+            val config = parsed_entry.config
             val contentId = generateContentId(parsed, entry.filename)
             val localFile = File(cacheDir, entry.filename)
             if (!localFile.exists()) continue
 
-            // Store mapping
+            localFileMap[contentId] = localFile
+
+            // ページ制御=1(全ページ)の場合: durationSecondsをpdfPageDurationとして扱う
+            val itemFirstPageOnly = config.firstPageOnly
+            val itemPdfPageDuration = if (!itemFirstPageOnly) config.durationSeconds else null
+            val itemDuration = if (!itemFirstPageOnly) {
+                // allPagesモード: 安全弁用に大きめ設定
+                (entry.pageCount + 1) * config.durationSeconds
+            } else {
+                config.durationSeconds
+            }
+
+            items.add(
+                PlaylistItem(
+                    id = contentId,
+                    scope = "smb_${parentItem.id}",
+                    contentId = contentId,
+                    name = entry.filename,
+                    type = "pdf",
+                    url = null,
+                    fileUrl = null,
+                    pdfPageDuration = itemPdfPageDuration,
+                    durationSeconds = itemDuration,
+                    displayOrder = displayIndex++,
+                    useProxy = false,
+                    proxyUrl = null,
+                    smbPath = null,
+                    smbUsername = null,
+                    smbPassword = null,
+                    firstPageOnly = itemFirstPageOnly,
+                    isPortrait = entry.isPortrait
+                )
+            )
+        }
+
+        // 規約外ファイル: 親アイテムのデフォルト設定を使用（従来動作）
+        for (entry in sortedDefault) {
+            val contentId = generateContentId(parsed, entry.filename)
+            val localFile = File(cacheDir, entry.filename)
+            if (!localFile.exists()) continue
+
             localFileMap[contentId] = localFile
 
             // allPagesモードでは安全弁用にdurationSecondsを大きめに設定
@@ -371,7 +483,7 @@ class SmbPdfManager(private val context: Context) {
                     fileUrl = null,
                     pdfPageDuration = pdfPageDuration,
                     durationSeconds = itemDuration,
-                    displayOrder = index,
+                    displayOrder = displayIndex++,
                     useProxy = false,
                     proxyUrl = null,
                     smbPath = null,
