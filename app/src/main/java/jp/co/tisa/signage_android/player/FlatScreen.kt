@@ -13,8 +13,10 @@ import java.io.File
 data class FlatScreen(
     /** 表示タイプ: "web", "pdf", "dual_pdf" */
     val type: String,
-    /** ステータスバー表示名 */
+    /** 内部表示名（ファイル名そのまま。ログ/デバッグ用） */
     val displayName: String,
+    /** ユーザー向けに整形したタイトル（命名規約の制御部・拡張子を除去） */
+    val displayTitle: String = displayName,
     /** 表示時間（秒） */
     val durationSeconds: Int,
     /** allPagesモード（PDF.js内ページ送り） */
@@ -49,11 +51,23 @@ data class FlatScreen(
     val mainPlaylistIndex: Int = 0,
 ) {
     companion object {
+        /**
+         * 命名規約 {順番}_{ページ}_{開始日}_{終了日}_{秒}_{説明} から説明部分を取り出し、
+         * 拡張子を除去した表示用タイトルを返す。規約外は拡張子のみ除去。
+         */
+        private val titlePattern = Regex("""^\d+_[01]_\d{8}_\d{8}_\d+_(.+)$""")
+
+        fun formatTitle(rawName: String): String {
+            val noExt = rawName.substringBeforeLast('.', rawName)
+            return titlePattern.matchEntire(noExt)?.groupValues?.get(1) ?: noExt
+        }
+
         /** WebコンテンツからFlatScreenを作成 */
         fun fromWeb(item: PlaylistItem, mainIndex: Int): FlatScreen {
             return FlatScreen(
                 type = "web",
                 displayName = item.name,
+                displayTitle = formatTitle(item.name),
                 durationSeconds = item.durationSeconds,
                 url = item.url,
                 item = item,
@@ -67,6 +81,7 @@ data class FlatScreen(
             return FlatScreen(
                 type = "pdf",
                 displayName = item.name,
+                displayTitle = formatTitle(item.name),
                 durationSeconds = item.durationSeconds,
                 isAllPages = isAllPages,
                 pdfPageDuration = item.pdfPageDuration,
@@ -91,6 +106,7 @@ data class FlatScreen(
             return FlatScreen(
                 type = "pdf",
                 displayName = subItem.name,
+                displayTitle = formatTitle(subItem.name),
                 durationSeconds = subItem.durationSeconds,
                 isAllPages = isAllPages,
                 pdfPageDuration = subItem.pdfPageDuration,
@@ -115,6 +131,7 @@ data class FlatScreen(
             return FlatScreen(
                 type = "dual_pdf",
                 displayName = "${leftItem.name} / ${rightItem.name}",
+                displayTitle = "${formatTitle(leftItem.name)} / ${formatTitle(rightItem.name)}",
                 durationSeconds = leftItem.durationSeconds,
                 contentId = leftItem.contentId,
                 sourceFile = leftFile,

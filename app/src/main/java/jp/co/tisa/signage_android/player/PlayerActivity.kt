@@ -69,6 +69,8 @@ class PlayerActivity : ComponentActivity() {
     private var isScreenListMode = false
     private var selectedListIndex = 0
     private var thumbnailToken = 0  // 高速移動時のサムネイル取り違え防止
+    private var screenListTimeout: Runnable? = null
+    private val SCREEN_LIST_TIMEOUT_MS = 60_000L  // 無操作で選択確定するまでの時間
 
     private val debugLines = mutableListOf<String>()
     private var debugPage = 0  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
@@ -574,7 +576,7 @@ class PlayerActivity : ComponentActivity() {
             currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
             val screen = flatScreens[currentScreenIndex]
             loadScreen(activeWebView!!, screen)
-            statusBar.text = formatStatusText(screen.displayName, "⏸ 一時停止中 (戻るで再開)")
+            statusBar.text = formatStatusText(screen.displayTitle, "⏸ 一時停止中 (戻るで再開)")
         } else {
             advanceToNext()
         }
@@ -590,7 +592,7 @@ class PlayerActivity : ComponentActivity() {
             currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
             val screen = flatScreens[currentScreenIndex]
             loadScreen(activeWebView!!, screen)
-            statusBar.text = formatStatusText(screen.displayName, "⏸ 一時停止中 (戻るで再開)")
+            statusBar.text = formatStatusText(screen.displayTitle, "⏸ 一時停止中 (戻るで再開)")
         } else {
             // If prev is ready, swap immediately; otherwise wait
             if (prevReady) {
@@ -656,7 +658,7 @@ class PlayerActivity : ComponentActivity() {
 
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
-        statusBar.text = formatStatusText(screen?.displayName ?: "", "⏸ 一時停止中 (戻るで再開)")
+        statusBar.text = formatStatusText(screen?.displayTitle ?: "", "⏸ 一時停止中 (戻るで再開)")
 
         enableWebViewInteraction()
     }
@@ -712,19 +714,33 @@ class PlayerActivity : ComponentActivity() {
         renderScreenList()
         updatePreviewThumbnail()
         screenListOverlay.visibility = View.VISIBLE
+        scheduleScreenListTimeout()
         addDebugLog("[LIST] 一覧表示 (現在 ${currentScreenIndex + 1}/${flatScreens.size})")
     }
 
-    /** 選択カーソルを移動（循環） */
+    /** 選択カーソルを移動（循環）。操作のたびに無操作タイマーをリセット */
     private fun moveSelection(delta: Int) {
         if (flatScreens.isEmpty()) return
         selectedListIndex = (selectedListIndex + delta + flatScreens.size) % flatScreens.size
         renderScreenList()
         updatePreviewThumbnail()
+        scheduleScreenListTimeout()
+    }
+
+    /** 無操作タイマーを再セット。期限到達で現在の選択行を確定して再生に戻る */
+    private fun scheduleScreenListTimeout() {
+        screenListTimeout?.let { handler.removeCallbacks(it) }
+        screenListTimeout = Runnable {
+            if (isScreenListMode) {
+                addDebugLog("[LIST] 60秒無操作 → 選択確定")
+                confirmSelection()
+            }
+        }.also { handler.postDelayed(it, SCREEN_LIST_TIMEOUT_MS) }
     }
 
     /** 選択中の画面へジャンプして通常再生を継続 */
     private fun confirmSelection() {
+        screenListTimeout?.let { handler.removeCallbacks(it) }
         isScreenListMode = false
         screenListOverlay.visibility = View.GONE
         previewImageView.setImageDrawable(null)
@@ -736,6 +752,7 @@ class PlayerActivity : ComponentActivity() {
 
     /** 一覧をキャンセルして現在ページの再生を再開 */
     private fun closeScreenList() {
+        screenListTimeout?.let { handler.removeCallbacks(it) }
         isScreenListMode = false
         screenListOverlay.visibility = View.GONE
         previewImageView.setImageDrawable(null)
@@ -765,13 +782,7 @@ class PlayerActivity : ComponentActivity() {
             val screen = flatScreens[idx]
             val cursor = if (offset == 0) "▶ " else "   "
             val playing = if (idx == currentScreenIndex) "●" else " "
-            val typeTag = when (screen.type) {
-                "web" -> "web"
-                "pdf" -> "pdf"
-                "dual_pdf" -> "dual"
-                else -> screen.type
-            }
-            sb.append("$cursor$playing ${idx + 1}. [$typeTag] ${screen.displayName}\n")
+            sb.append("$cursor$playing ${idx + 1}. ${screen.displayTitle}\n")
         }
 
         screenListText.text = sb.toString().trimEnd()
@@ -780,7 +791,7 @@ class PlayerActivity : ComponentActivity() {
     /** 選択中画面のキャッシュサムネイルを右側に表示（未キャッシュ/webはNo Preview） */
     private fun updatePreviewThumbnail() {
         val screen = flatScreens.getOrNull(selectedListIndex) ?: return
-        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}"
+        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayTitle}"
 
         val thumbFile = findThumbnailFile(screen)
         if (thumbFile == null) {
@@ -789,7 +800,7 @@ class PlayerActivity : ComponentActivity() {
                 setColor(Color.TRANSPARENT)
                 setStroke(2, 0xFF444444.toInt())
             }
-            previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}\n(No Preview)"
+            previewLabel.text = "${selectedListIndex + 1}. ${screen.displayTitle}\n(No Preview)"
             return
         }
 
@@ -805,7 +816,7 @@ class PlayerActivity : ComponentActivity() {
                         previewImageView.setImageBitmap(bmp)
                     } else {
                         previewImageView.setImageDrawable(null)
-                        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}\n(No Preview)"
+                        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayTitle}\n(No Preview)"
                     }
                 }
             }
@@ -1595,7 +1606,7 @@ class PlayerActivity : ComponentActivity() {
                     val screen = flatScreens.getOrNull(currentScreenIndex)
                     val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                     statusBar.text = formatStatusText(
-                        screen?.displayName ?: "",
+                        screen?.displayTitle ?: "",
                         "$label: ${remainingSeconds}秒"
                     )
                     handler.postDelayed(this, 1000)
@@ -1639,6 +1650,7 @@ class PlayerActivity : ComponentActivity() {
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
         longPressResetRunnable?.let { handler.removeCallbacks(it) }
+        screenListTimeout?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
         coroutineScope.cancel()
         webViewA.destroy()
@@ -1686,7 +1698,7 @@ class PlayerActivity : ComponentActivity() {
                         val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                         "$label: ${remainingSeconds}秒"
                     }
-                    statusBar.text = formatStatusText(screen.displayName, suffix)
+                    statusBar.text = formatStatusText(screen.displayTitle, suffix)
                 }
             }
         }
@@ -1714,6 +1726,7 @@ class PlayerActivity : ComponentActivity() {
                         ?: pdfCacheManager.getCachedPdfPath(contentId)
 
                     val firstPageOnly = screen?.firstPageOnly ?: false
+                    val title = screen?.displayTitle ?: ""
 
                     val screenW = resources.displayMetrics.widthPixels
                     val screenH = resources.displayMetrics.heightPixels
@@ -1725,7 +1738,8 @@ class PlayerActivity : ComponentActivity() {
                             "dual_${contentId}_${contentId2}",
                             screenIndex, totalScreens, jpegBytes,
                             sourceFile, screenW, screenH, true,
-                            sourceFile2 = sourceFile2
+                            sourceFile2 = sourceFile2,
+                            title = title
                         )
                         return@launch
                     } else {
@@ -1734,7 +1748,8 @@ class PlayerActivity : ComponentActivity() {
 
                     pdfRenderCacheManager.saveRenderedScreen(
                         cacheKey, screenIndex, totalScreens, jpegBytes,
-                        sourceFile, screenW, screenH, firstPageOnly
+                        sourceFile, screenW, screenH, firstPageOnly,
+                        title = title
                     )
 
                     withContext(Dispatchers.Main) {

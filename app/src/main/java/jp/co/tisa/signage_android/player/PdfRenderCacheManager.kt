@@ -135,7 +135,8 @@ class PdfRenderCacheManager(context: Context) {
         screenWidth: Int,
         screenHeight: Int,
         firstPageOnly: Boolean,
-        sourceFile2: File? = null  // デュアル用
+        sourceFile2: File? = null,  // デュアル用
+        title: String = ""          // 一覧表示用の整形済みタイトル
     ) {
         try {
             val dir = File(cacheDir, cacheKey)
@@ -156,6 +157,7 @@ class PdfRenderCacheManager(context: Context) {
                     screenHeight = screenHeight,
                     totalScreens = totalScreens,
                     firstPageOnly = firstPageOnly,
+                    title = title,
                     createdAt = System.currentTimeMillis()
                 )
                 saveMeta(dir, meta)
@@ -223,6 +225,7 @@ class PdfRenderCacheManager(context: Context) {
         val screenHeight: Int,
         val totalScreens: Int,
         val firstPageOnly: Boolean,
+        val title: String = "",          // 一覧表示用の整形済みタイトル
         val createdAt: Long
     )
 }
