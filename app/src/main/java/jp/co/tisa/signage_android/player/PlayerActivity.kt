@@ -618,6 +618,14 @@ class PlayerActivity : ComponentActivity() {
         // Move schedule index
         scheduleManager.goToPrevious()
         val item = scheduleManager.getCurrentItem() ?: return
+
+        // pdf_folder の場合: フォルダ再生を開始（doAdvanceと同様）
+        if (item.type == "pdf_folder") {
+            addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → フォルダ再生開始")
+            startPdfFolderPlayback(item)
+            return
+        }
+
         updateStatusBar(item)
 
         // nextReady is true (old active already had content)
