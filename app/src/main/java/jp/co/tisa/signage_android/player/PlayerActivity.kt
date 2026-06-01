@@ -632,7 +632,11 @@ class PlayerActivity : ComponentActivity() {
         // Preload previous into the recycled WebView
         prevReady = false
         scheduleManager.getPreviousItem()?.let { prevItem ->
-            preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
+            if (prevItem.type != "pdf_folder") {
+                preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
+            } else {
+                prevReady = true  // pdf_folderはprev先読みスキップ（preloadBothDirectionsと同様）
+            }
         }
     }
 
