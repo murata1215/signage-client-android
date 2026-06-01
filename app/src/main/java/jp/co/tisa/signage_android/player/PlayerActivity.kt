@@ -596,7 +596,37 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun doPreviousSwap() {
-        // Rotate: active→next, prev→active, next→prev
+        // 先にスケジュールインデックスを移動してアイテムタイプを確認
+        scheduleManager.goToPrevious()
+        val item = scheduleManager.getCurrentItem() ?: return
+
+        // pdf_folder: WebViewスワップせず、activeWebViewに直接ロード
+        // （prevWebViewには古い内容が残っているため、スワップすると一瞬表示されてしまう）
+        if (item.type == "pdf_folder") {
+            val cachedSub = smbPdfManager?.buildPlaylistFromCache(item)
+            if (!cachedSub.isNullOrEmpty()) {
+                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュから即再生 (${cachedSub.size}件)")
+                currentPdfFolderItem = item
+                isPlaying = true
+                isPaused = false
+                pdfFolderSubPlaylist = cachedSub
+                pdfFolderSubIndex = 0
+                val subItem = cachedSub[0]
+                val isFirstPageOnly = item.firstPageOnly == true
+                if (isFirstPageOnly && subItem.isPortrait && cachedSub.size > 1 && cachedSub[1].isPortrait) {
+                    loadDualPdfContent(activeWebView!!, subItem, cachedSub[1])
+                } else {
+                    loadContent(activeWebView!!, subItem)
+                }
+                playCurrentSubPdfAfterSwap()
+            } else {
+                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュなし、SMB同期開始")
+                startPdfFolderPlayback(item)
+            }
+            return
+        }
+
+        // 通常アイテム: WebViewローテーション＋クロスフェード
         val oldActive = activeWebView
         val oldNext = nextWebView
         val oldPrev = prevWebView
@@ -614,36 +644,6 @@ class PlayerActivity : ComponentActivity() {
         oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
             oldActive.visibility = View.INVISIBLE
         }?.start()
-
-        // Move schedule index
-        scheduleManager.goToPrevious()
-        val item = scheduleManager.getCurrentItem() ?: return
-
-        // pdf_folder の場合: キャッシュから即再生（SMB同期スキップ）
-        if (item.type == "pdf_folder") {
-            val cachedSub = smbPdfManager?.buildPlaylistFromCache(item)
-            if (!cachedSub.isNullOrEmpty()) {
-                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュから即再生 (${cachedSub.size}件)")
-                currentPdfFolderItem = item
-                isPlaying = true
-                isPaused = false
-                // activeWebViewに1件目を直接ロード（更新中画面なし）
-                pdfFolderSubPlaylist = cachedSub
-                pdfFolderSubIndex = 0
-                val subItem = cachedSub[0]
-                val isFirstPageOnly = item.firstPageOnly == true
-                if (isFirstPageOnly && subItem.isPortrait && cachedSub.size > 1 && cachedSub[1].isPortrait) {
-                    loadDualPdfContent(activeWebView!!, subItem, cachedSub[1])
-                } else {
-                    loadContent(activeWebView!!, subItem)
-                }
-                playCurrentSubPdfAfterSwap()
-            } else {
-                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュなし、SMB同期開始")
-                startPdfFolderPlayback(item)
-            }
-            return
-        }
 
         updateStatusBar(item)
 
