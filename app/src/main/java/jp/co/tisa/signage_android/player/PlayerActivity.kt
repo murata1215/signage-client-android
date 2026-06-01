@@ -793,7 +793,7 @@ class PlayerActivity : ComponentActivity() {
             text = "[1/4] デバッグログ (下ボタンで切替)\n起動中..."
             isClickable = false
             isFocusable = false
-            visibility = View.VISIBLE
+            visibility = if (debugPage == 0) View.GONE else View.VISIBLE
         }
         containerLayout.addView(debugTextView)
 
