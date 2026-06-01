@@ -12,8 +12,8 @@ Linux版 (Electron) の Android 移植版。
 - **PDFデュアルページ表示** - A4縦PDFを自動検出し見開き2ページ表示 (allPages: 同一PDF内 / firstPageOnly: 異なるPDF同士)
 - **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)、ファイル名規約による個別表示制御対応
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード
-- **サブプレイリスト先読み** - pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示 (onPageChangedでレンダリング完了検知)
-- **pdf_folder先読み** - Webページ/サブPL表示中にバックグラウンドでSMB同期+1件目PDFレンダリング完了 (Web→folder, folder→folder共に即切替、「更新中」画面なし)
+- **フラットスクリーンリスト** - スケジュール取得時にpdf_folderを展開し全コンテンツを1次元リストに格納。ナビゲーションはcurrentScreenIndexの増減のみ
+- **PDFレンダリングキャッシュ** - 初回表示時にcanvasをJPEGキャプチャ→保存、2回目以降はcached-pdf-viewer.htmlで画像直接表示 (PDF.jsスキップで爆速)
 - **スケジュール更新** - SignageServiceが60秒間隔でスケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
 - **再生時間外自動停止** - コンテンツ切替時に再生時間チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュールリトライ** - 取得失敗/コンテンツなし時は60秒間隔でリトライ
@@ -78,7 +78,9 @@ jp.co.tisa.signage_android/
 ├── player/
 │   ├── PlayerActivity.kt    # WebView再生画面 (フルスクリーン)
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
+│   ├── FlatScreen.kt        # フラット化された1画面データクラス
 │   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   ├── PdfRenderCacheManager.kt # PDFレンダリング済み画像キャッシュ(JPEG)
 │   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ管理
 ├── service/
 │   ├── SignageService.kt     # Foreground Service (ハートビート + アップデート + スケジュール更新チェック)
@@ -137,12 +139,11 @@ jp.co.tisa.signage_android/
         ├── ハートビート送信ループ
         ├── SignageService がスケジュール+APK更新チェック (60秒間隔)
         │   └── 更新あり → Broadcast → PlayerActivityがスケジュール反映
-        └── type=pdf_folder 再生時
-            ├── 前コンテンツ表示中にSMB同期+1件目PDF先読み完了 (preloadPdfFolder)
-            ├── 先読み完了済み → 即WebViewスワップ (「更新中」画面なし)
-            ├── 子PDFサブプレイリスト再生 (WebViewスワップ方式で即表示)
-            ├── サブPL最終PDF表示中に次のpdf_folderを先読み (folder→folder即切替)
-            └── 全子PDF完了 → メインプレイリスト次アイテムへ
+        └── フラットスクリーンリスト構築
+            ├── pdf_folderをSMBキャッシュから展開 (デュアルペアリング含む)
+            ├── 全コンテンツを1次元リストに格納
+            ├── currentScreenIndex の増減でナビゲーション
+            └── next/prev両方向を先読みして800msフェード切替
 
 再生中の設定変更
   5秒長押し → 設定画面 (現在の値が入った状態)

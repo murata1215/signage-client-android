@@ -77,8 +77,7 @@ jp.co.tisa.signage_android/
 - PDF デュアルページ自動判定: 1ページ目のviewport height>widthで縦長検出、allPagesは同一PDF内見開き、firstPageOnlyは異なるPDFの1ページ目同士をloadDualFirstPages()で見開き
 - WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
 - PdfJsInterface にWebView参照を持たせ、activeWebViewからの通知のみステータスバー更新(先読みWebViewの干渉防止)
-- type=pdf_folder はサブプレイリスト方式で統合 (メインプレイリスト内にpdf_folderアイテム → 同期画面 → 子PDFサブループ → メイン次アイテムへ)
-- サブプレイリスト先読み: 現在のPDF表示中にnextWebViewへ次のPDFを先読み、onPageChangedコールバックでレンダリング完了を検知してからWebViewスワップ
+- フラットスクリーンリスト: スケジュール取得時にpdf_folderをSMBキャッシュから展開し全コンテンツを1次元FlatScreenリストに格納。デュアルページは隣接する縦長PDFを自動ペアリング。ナビゲーションはcurrentScreenIndexの増減のみ（サブプレイリスト管理を廃止）
 - スケジュール更新はSignageServiceに一元化 (PlayerActivity内のstartPolling廃止、advanceToNextからcheckForUpdate削除)
 - SMBパスワードはAES-256-CBC暗号化(サーバー/クライアント共通鍵)
 - スケジュール取得失敗/コンテンツなし時は60秒間隔リトライ
@@ -87,9 +86,7 @@ jp.co.tisa.signage_android/
 - dispatchKeyEvent でリモコンキーをView階層より先に捕捉
 - setInitialScale(100) + loadWithOverviewMode=false でズーム固定
 - PDF.js Web Worker有効化 (CDNからpdf.worker.min.jsロード) + デュアルPDF読み込み/レンダリングをPromise.allで並列化
-- pdf_folder先読み: preloadPdfFolder()でWebページ表示中にSMB同期+PDF先読み完了、doAdvance()/advanceToNextMain()で即スワップ
-- サブPL最終PDF時にpreloadNextSubPdf()から次メインpdf_folderを先読み(folder→folder即切替)
-- advanceToNextSubPdf()で最終サブPDF検出時はWebViewスワップせず直接advanceToNextMain()へ(ダブルスワップ防止)
+- フラットスクリーンナビゲーション: 進む=currentScreenIndex++, 戻る=currentScreenIndex--。WebView 3枚ローテーション(doAdvance/doPreviousSwap)でクロスフェード。先読みはpreloadBothDirections()でnext/prev両方向
 - SMB PDFフォルダ命名規約: parseFileNameConfig()でファイル名パース、規約ファイルはsortOrder順+日付フィルタ+個別firstPageOnly/duration、規約外は親アイテムのデフォルト設定で後方配置
 - デバッグオーバーレイ4ページ: debugPage(0-4)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新、ページ4は命名規約マニュアル(静的)
 - SignageServiceからACTION_HEARTBEAT Broadcast送信、PlayerActivityで受信して最終HB時刻記録
