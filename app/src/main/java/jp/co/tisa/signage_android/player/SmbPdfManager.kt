@@ -229,6 +229,29 @@ class SmbPdfManager(private val context: Context) {
         }
     }
 
+    /**
+     * SMB接続せずにローカルキャッシュからサブプレイリストを構築する。
+     * 戻る操作などで「更新中」画面を出さずに即再生するために使用。
+     * キャッシュが存在しない場合は空リストを返す。
+     */
+    fun buildPlaylistFromCache(folderItem: PlaylistItem): List<PlaylistItem> {
+        val smbPath = folderItem.smbPath ?: return emptyList()
+        val parsed = parseUncPath(smbPath) ?: return emptyList()
+        val isFirstPageOnly = folderItem.firstPageOnly == true
+        val durationSeconds = folderItem.durationSeconds
+        val pdfPageDuration = folderItem.pdfPageDuration
+
+        val shareHash = "${parsed.host}_${parsed.shareName}_${parsed.path}".hashCode()
+            .let { if (it < 0) "n${-it}" else "$it" }
+        val cacheDir = File(baseCacheDir, "share_$shareHash")
+        val metadataFile = File(cacheDir, "_metadata.json")
+
+        val cachedEntries = loadMetadata(metadataFile)
+        if (cachedEntries.isEmpty()) return emptyList()
+
+        return buildPlaylist(cachedEntries, cacheDir, folderItem, parsed, isFirstPageOnly, durationSeconds, pdfPageDuration)
+    }
+
     // =====================================================================
     // SMB operations
     // =====================================================================
