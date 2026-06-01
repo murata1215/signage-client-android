@@ -58,7 +58,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
     private val debugLines = mutableListOf<String>()
-    private var debugPage = 1  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
+    private var debugPage = 0  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
     private var lastHeartbeatTime: String? = null
     private var lastScheduleUpdateTime: String? = null
 
