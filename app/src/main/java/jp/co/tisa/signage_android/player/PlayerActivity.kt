@@ -23,10 +23,13 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import jp.co.tisa.signage_android.data.ConfigManager
@@ -57,6 +60,16 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var touchOverlay: View
     private lateinit var pauseBorder: View
     private lateinit var debugTextView: TextView
+
+    // 画面一覧オーバーレイ（リモコン上下で表示・選択ジャンプ）
+    private lateinit var screenListOverlay: FrameLayout
+    private lateinit var screenListText: TextView
+    private lateinit var previewImageView: ImageView
+    private lateinit var previewLabel: TextView
+    private var isScreenListMode = false
+    private var selectedListIndex = 0
+    private var thumbnailToken = 0  // 高速移動時のサムネイル取り違え防止
+
     private val debugLines = mutableListOf<String>()
     private var debugPage = 0  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
     private var lastHeartbeatTime: String? = null
@@ -473,6 +486,21 @@ class PlayerActivity : ComponentActivity() {
             return true
         }
 
+        // 画面一覧オーバーレイ表示中は専用キー処理を最優先
+        if (isScreenListMode) {
+            return when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_CHANNEL_UP -> { moveSelection(-1); true }
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_CHANNEL_DOWN -> { moveSelection(1); true }
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { confirmSelection(); true }
+                KeyEvent.KEYCODE_BACK -> { closeScreenList(); true }
+                else -> true  // オーバーレイ中は他キーを握りつぶす
+            }
+        }
+
         // When paused (interactive mode), only intercept BACK to resume
         if (isPaused) {
             return when (keyCode) {
@@ -514,7 +542,8 @@ class PlayerActivity : ComponentActivity() {
             }
             KeyEvent.KEYCODE_DPAD_UP,
             KeyEvent.KEYCODE_DPAD_DOWN -> {
-                true // Consume to prevent WebView from scrolling/focusing
+                openScreenList()
+                true
             }
             // F1-F4 keys
             KeyEvent.KEYCODE_F1 -> { addDebugLog("[KEY] F1 pressed"); true }
@@ -665,6 +694,151 @@ class PlayerActivity : ComponentActivity() {
     }
 
     // =========================================================================
+    // Screen List Overlay (リモコン上下で一覧表示・選択ジャンプ)
+    // =========================================================================
+
+    /** 一覧オーバーレイを開く（自動送りを一時停止） */
+    private fun openScreenList() {
+        if (!isPlaying || flatScreens.isEmpty()) return
+        if (isScreenListMode) return
+
+        isScreenListMode = true
+        selectedListIndex = currentScreenIndex
+
+        // 自動送り・カウントダウンを停止（オーバーレイ操作中はページが進まない）
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+
+        renderScreenList()
+        updatePreviewThumbnail()
+        screenListOverlay.visibility = View.VISIBLE
+        addDebugLog("[LIST] 一覧表示 (現在 ${currentScreenIndex + 1}/${flatScreens.size})")
+    }
+
+    /** 選択カーソルを移動（循環） */
+    private fun moveSelection(delta: Int) {
+        if (flatScreens.isEmpty()) return
+        selectedListIndex = (selectedListIndex + delta + flatScreens.size) % flatScreens.size
+        renderScreenList()
+        updatePreviewThumbnail()
+    }
+
+    /** 選択中の画面へジャンプして通常再生を継続 */
+    private fun confirmSelection() {
+        isScreenListMode = false
+        screenListOverlay.visibility = View.GONE
+        previewImageView.setImageDrawable(null)
+
+        currentScreenIndex = selectedListIndex
+        addDebugLog("[LIST] 選択ジャンプ → ${currentScreenIndex + 1}/${flatScreens.size}")
+        displayCurrentScreen()
+    }
+
+    /** 一覧をキャンセルして現在ページの再生を再開 */
+    private fun closeScreenList() {
+        isScreenListMode = false
+        screenListOverlay.visibility = View.GONE
+        previewImageView.setImageDrawable(null)
+        addDebugLog("[LIST] 一覧キャンセル")
+
+        if (isPlaying && !isPaused) {
+            flatScreens.getOrNull(currentScreenIndex)?.let { screen ->
+                updateScreenStatusBar(screen)
+                scheduleAutoAdvance(screen)
+            }
+        }
+    }
+
+    /** 選択行を常に中央に置く7行窓（上3 / 選択 / 下3）を循環描画 */
+    private fun renderScreenList() {
+        val size = flatScreens.size
+        if (size == 0) return
+
+        val sb = StringBuilder()
+        sb.append("画面一覧  ▲▼:選択  中央:決定  戻る:取消\n")
+        sb.append("${selectedListIndex + 1} / $size\n")
+        sb.append("─".repeat(22)).append("\n")
+
+        val span = 3  // 上下に表示する行数
+        for (offset in -span..span) {
+            val idx = (selectedListIndex + offset + size) % size
+            val screen = flatScreens[idx]
+            val cursor = if (offset == 0) "▶ " else "   "
+            val playing = if (idx == currentScreenIndex) "●" else " "
+            val typeTag = when (screen.type) {
+                "web" -> "web"
+                "pdf" -> "pdf"
+                "dual_pdf" -> "dual"
+                else -> screen.type
+            }
+            sb.append("$cursor$playing ${idx + 1}. [$typeTag] ${screen.displayName}\n")
+        }
+
+        screenListText.text = sb.toString().trimEnd()
+    }
+
+    /** 選択中画面のキャッシュサムネイルを右側に表示（未キャッシュ/webはNo Preview） */
+    private fun updatePreviewThumbnail() {
+        val screen = flatScreens.getOrNull(selectedListIndex) ?: return
+        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}"
+
+        val thumbFile = findThumbnailFile(screen)
+        if (thumbFile == null) {
+            previewImageView.setImageDrawable(null)
+            previewImageView.background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(2, 0xFF444444.toInt())
+            }
+            previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}\n(No Preview)"
+            return
+        }
+
+        val token = ++thumbnailToken
+        coroutineScope.launch(Dispatchers.IO) {
+            val bmp = try {
+                decodeSampledBitmap(thumbFile, resources.displayMetrics.widthPixels / 2)
+            } catch (_: Exception) { null }
+            withContext(Dispatchers.Main) {
+                // 選択が動いていなければ反映（高速移動時の取り違え防止）
+                if (token == thumbnailToken && isScreenListMode) {
+                    if (bmp != null) {
+                        previewImageView.setImageBitmap(bmp)
+                    } else {
+                        previewImageView.setImageDrawable(null)
+                        previewLabel.text = "${selectedListIndex + 1}. ${screen.displayName}\n(No Preview)"
+                    }
+                }
+            }
+        }
+    }
+
+    /** 画面に対応するサムネイルJPEG（キャッシュ済みPDF1ページ目）を探す。webや未キャッシュはnull */
+    private fun findThumbnailFile(screen: FlatScreen): File? {
+        return when (screen.type) {
+            "pdf" -> pdfRenderCacheManager.getCachedImagePaths(screen.contentId)?.firstOrNull()
+            "dual_pdf" -> pdfRenderCacheManager
+                .getCachedDualImagePaths(screen.contentId, screen.rightContentId)?.firstOrNull()
+            else -> null  // web: 将来的にキャッシュ対応予定
+        }?.takeIf { it.exists() }
+    }
+
+    /** JPEGをreqWidth程度にダウンサンプルしてデコード */
+    private fun decodeSampledBitmap(file: File, reqWidth: Int): android.graphics.Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        var sample = 1
+        if (reqWidth > 0 && bounds.outWidth > reqWidth) {
+            var w = bounds.outWidth
+            while (w / 2 >= reqWidth) {
+                sample *= 2
+                w /= 2
+            }
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return BitmapFactory.decodeFile(file.absolutePath, opts)
+    }
+
+    // =========================================================================
     // View Setup
     // =========================================================================
 
@@ -773,6 +947,69 @@ class PlayerActivity : ComponentActivity() {
             visibility = if (debugPage == 0) View.GONE else View.VISIBLE
         }
         containerLayout.addView(debugTextView)
+
+        // 画面一覧オーバーレイ（最前面・初期非表示）
+        screenListOverlay = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(0xEE000000.toInt())
+            visibility = View.GONE
+            isClickable = true  // 背面WebViewへのタッチ透過を防ぐ
+        }
+
+        // 左：リスト（緑文字・等幅・縦中央）
+        screenListText = TextView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                displayMetrics.widthPixels / 2,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+            }
+            typeface = Typeface.MONOSPACE
+            setTextColor(0xFF00FF00.toInt())
+            textSize = 16f
+            setPadding(24, 24, 24, 24)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        screenListOverlay.addView(screenListText)
+
+        // 右：サムネイルプレビュー
+        previewImageView = ImageView(this).apply {
+            val w = displayMetrics.widthPixels / 2
+            layoutParams = FrameLayout.LayoutParams(
+                w - 48,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                gravity = android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+                setMargins(0, 48, 24, 96)
+            }
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(2, 0xFF444444.toInt())
+            }
+        }
+        screenListOverlay.addView(previewImageView)
+
+        // 右下：プレビューのラベル
+        previewLabel = TextView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                displayMetrics.widthPixels / 2,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = android.view.Gravity.END or android.view.Gravity.BOTTOM
+                setMargins(0, 0, 24, 32)
+            }
+            setTextColor(0xFFCCCCCC.toInt())
+            textSize = 14f
+            gravity = android.view.Gravity.CENTER
+            setPadding(24, 8, 24, 8)
+        }
+        screenListOverlay.addView(previewLabel)
+
+        containerLayout.addView(screenListOverlay)
 
         setContentView(containerLayout)
 
@@ -1100,6 +1337,7 @@ class PlayerActivity : ComponentActivity() {
 
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
+        if (isScreenListMode) return  // 一覧表示中はページを進めない
         if (flatScreens.isEmpty()) return
 
         // 再生時間外チェック
