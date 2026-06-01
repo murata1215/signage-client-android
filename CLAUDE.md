@@ -16,9 +16,8 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **PDFデュアルページ**: A4縦PDFを自動判定し見開き表示(allPages: 同一PDF内2ページ並べ / firstPageOnly: 異なるPDFの1ページ目同士を並べ)
 - **PDF高解像度レンダリング**: devicePixelRatio対応でシャープ表示(canvas解像度=物理ピクセル、CSS表示=論理ピクセル)
 - **PDFレンダリングキャッシュ**: 初回表示時にcanvasをJPEGキャプチャ→保存、2回目以降はcached-pdf-viewer.htmlで画像直接表示(PDF.jsスキップで爆速)
+- **フラットスクリーンリスト**: スケジュール取得時にpdf_folderを展開し全コンテンツを1次元リストに格納。ナビゲーションはcurrentScreenIndexの増減のみ
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
-- **サブプレイリスト先読み**: pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示(1件目は同期画面の裏で先読み)
-- **pdf_folder先読み**: Webページ/サブPL表示中にバックグラウンドでSMB同期+1件目PDFレンダリング完了(Web→folder, folder→folder共に即切替)
 - **SMB PDFフォルダ**: type=pdf_folder でWindows共有フォルダからPDFを自動取得・ローテーション表示
 - **再生時間外自動停止**: コンテンツ切替時にisWithinPlayTime()チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュール更新一元化**: SignageServiceが60秒間隔でAPK+スケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
@@ -42,6 +41,7 @@ jp.co.tisa.signage_android/
 ├── player/
 │   ├── PlayerActivity.kt    # WebView再生画面(フルスクリーン)
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
+│   ├── FlatScreen.kt         # フラット化された1画面データクラス
 │   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
 │   ├── PdfRenderCacheManager.kt # PDFレンダリング済み画像キャッシュ(JPEG)
 │   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ・サブプレイリスト生成

@@ -45,10 +45,9 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var pdfRenderCacheManager: PdfRenderCacheManager
     private var smbPdfManager: SmbPdfManager? = null
 
-    // pdf_folder サブプレイリスト管理
-    private var pdfFolderSubPlaylist: List<PlaylistItem>? = null
-    private var pdfFolderSubIndex: Int = 0
-    private var currentPdfFolderItem: PlaylistItem? = null
+    // フラットスクリーンリスト（メインPL + pdf_folderサブPLを展開した1次元リスト）
+    private var flatScreens: List<FlatScreen> = emptyList()
+    private var currentScreenIndex: Int = 0
 
     private lateinit var containerLayout: FrameLayout
     private lateinit var webViewA: WebView
@@ -82,11 +81,6 @@ class PlayerActivity : ComponentActivity() {
     private var isPaused = false
     private var nextReady = false
     private var prevReady = false
-    private var subNextReady = false  // サブプレイリスト先読み完了フラグ
-
-    // pdf_folder先読み（Webページ表示中にSMB同期+1件目PDFレンダリング）
-    private var preloadedPdfFolderSubPlaylist: List<PlaylistItem>? = null
-    private var preloadedPdfFolderItem: PlaylistItem? = null
 
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
@@ -124,15 +118,19 @@ class PlayerActivity : ComponentActivity() {
                     pdfCacheManager.downloadAll(items)
                     val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
                     pdfCacheManager.cleanupUnused(activeIds)
-                    handler.post {
-                        addDebugLog("[SCHEDULE] スケジュール反映完了: ${items.size}件")
+                    pdfRenderCacheManager.cleanupUnused(activeIds)
+                    // フラットリスト再構築
+                    val newScreens = withContext(Dispatchers.IO) { buildFlatScreens(items) }
+                    withContext(Dispatchers.Main) {
+                        flatScreens = newScreens
+                        currentScreenIndex = 0
+                        addDebugLog("[SCHEDULE] スケジュール反映完了: ${items.size}件 → ${flatScreens.size}画面")
                         if (isPlaying) {
                             // 再生中: 次の切替時に新スケジュールが反映される
                         } else {
-                            // standby中: 再生時間内なら再生開始
                             if (scheduleManager.isWithinPlayTime()) {
                                 addDebugLog("[SCHEDULE] 再生時間内 → 再生開始")
-                                playCurrentContent()
+                                displayCurrentScreen()
                             }
                         }
                     }
@@ -240,38 +238,21 @@ class PlayerActivity : ComponentActivity() {
         val sb = StringBuilder("[2/4] スケジュール情報 (下ボタンで切替)\n")
         sb.append("バージョン: v${scheduleManager.version}\n")
         sb.append("再生時間: ${scheduleManager.playTimeRange}\n")
-
-        val playlist = scheduleManager.playlist
-        sb.append("プレイリスト: ${playlist.size}件\n")
-
-        val currentItem = scheduleManager.getCurrentItem()
-        val subList = pdfFolderSubPlaylist
-        val subIdx = pdfFolderSubIndex
-
-        if (subList != null) {
-            sb.append("状態: サブPL再生中 (${subIdx + 1}/${subList.size})\n")
-        }
-
+        sb.append("フラットスクリーン: ${flatScreens.size}画面\n")
+        sb.append("現在: ${currentScreenIndex + 1}/${flatScreens.size}\n")
         sb.append("─".repeat(20)).append("\n")
 
-        playlist.forEachIndexed { _, item ->
-            val prefix = if (item == currentItem) "▶ " else "  "
-            val typeTag = when (item.type) {
+        flatScreens.forEachIndexed { idx, screen ->
+            val prefix = if (idx == currentScreenIndex) "▶ " else "  "
+            val typeTag = when (screen.type) {
                 "web" -> "web"
                 "pdf" -> "pdf"
-                "pdf_folder" -> "folder"
-                else -> item.type
+                "dual_pdf" -> "dual"
+                else -> screen.type
             }
-            val dur = "${item.durationSeconds}秒"
-            sb.append("${prefix}#${item.displayOrder} [$typeTag] ${item.name} ($dur)\n")
-        }
-
-        if (subList != null && subList.isNotEmpty()) {
-            sb.append("\n[サブPL: ${currentPdfFolderItem?.name}]\n")
-            subList.forEachIndexed { idx, sub ->
-                val prefix = if (idx == subIdx) "▶ " else "  "
-                sb.append("${prefix}${idx + 1}. ${sub.name}\n")
-            }
+            val dur = "${screen.durationSeconds}秒"
+            val allPages = if (screen.isAllPages) " [全頁]" else ""
+            sb.append("${prefix}${idx + 1}. [$typeTag] ${screen.displayName} ($dur)$allPages\n")
         }
 
         return sb.toString().trimEnd()
@@ -556,11 +537,15 @@ class PlayerActivity : ComponentActivity() {
 
     private fun goToNext() {
         if (!isPlaying) return
+        if (flatScreens.isEmpty()) return
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
+
         if (isPaused) {
-            scheduleManager.advanceToNext()
-            val item = scheduleManager.getCurrentItem() ?: return
-            loadContent(activeWebView!!, item)
-            statusBar.text = formatStatusText(item.name, "⏸ 一時停止中 (戻るで再開)")
+            currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
+            val screen = flatScreens[currentScreenIndex]
+            loadScreen(activeWebView!!, screen)
+            statusBar.text = formatStatusText(screen.displayName, "⏸ 一時停止中 (戻るで再開)")
         } else {
             advanceToNext()
         }
@@ -568,16 +553,16 @@ class PlayerActivity : ComponentActivity() {
 
     private fun goToPrevious() {
         if (!isPlaying) return
-        if (isPaused) {
-            scheduleManager.goToPrevious()
-            val item = scheduleManager.getCurrentItem() ?: return
-            loadContent(activeWebView!!, item)
-            statusBar.text = formatStatusText(item.name, "⏸ 一時停止中 (戻るで再開)")
-        } else {
-            // Cancel current timers
-            contentTimer?.let { handler.removeCallbacks(it) }
-            countdownTimer?.let { handler.removeCallbacks(it) }
+        if (flatScreens.isEmpty()) return
+        contentTimer?.let { handler.removeCallbacks(it) }
+        countdownTimer?.let { handler.removeCallbacks(it) }
 
+        if (isPaused) {
+            currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+            val screen = flatScreens[currentScreenIndex]
+            loadScreen(activeWebView!!, screen)
+            statusBar.text = formatStatusText(screen.displayName, "⏸ 一時停止中 (戻るで再開)")
+        } else {
             // If prev is ready, swap immediately; otherwise wait
             if (prevReady) {
                 doPreviousSwap()
@@ -596,41 +581,14 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun doPreviousSwap() {
-        // 先にスケジュールインデックスを移動してアイテムタイプを確認
-        scheduleManager.goToPrevious()
-        val item = scheduleManager.getCurrentItem() ?: return
+        if (flatScreens.isEmpty()) return
+        currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+        val screen = flatScreens[currentScreenIndex]
 
-        // pdf_folder: WebViewスワップせず、activeWebViewに直接ロード
-        // （prevWebViewには古い内容が残っているため、スワップすると一瞬表示されてしまう）
-        if (item.type == "pdf_folder") {
-            val cachedSub = smbPdfManager?.buildPlaylistFromCache(item)
-            if (!cachedSub.isNullOrEmpty()) {
-                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュから即再生 (${cachedSub.size}件)")
-                currentPdfFolderItem = item
-                isPlaying = true
-                isPaused = false
-                pdfFolderSubPlaylist = cachedSub
-                pdfFolderSubIndex = 0
-                val subItem = cachedSub[0]
-                val isFirstPageOnly = item.firstPageOnly == true
-                if (isFirstPageOnly && subItem.isPortrait && cachedSub.size > 1 && cachedSub[1].isPortrait) {
-                    loadDualPdfContent(activeWebView!!, subItem, cachedSub[1])
-                } else {
-                    loadContent(activeWebView!!, subItem)
-                }
-                playCurrentSubPdfAfterSwap()
-            } else {
-                addDebugLog("[PLAY] 戻る → pdf_folder: ${item.name} → キャッシュなし、SMB同期開始")
-                startPdfFolderPlayback(item)
-            }
-            return
-        }
-
-        // 通常アイテム: WebViewローテーション＋クロスフェード
+        // WebViewローテーション: prev→active, active→next, next→prev
         val oldActive = activeWebView
         val oldNext = nextWebView
         val oldPrev = prevWebView
-
         activeWebView = oldPrev
         nextWebView = oldActive
         prevWebView = oldNext
@@ -645,37 +603,31 @@ class PlayerActivity : ComponentActivity() {
             oldActive.visibility = View.INVISIBLE
         }?.start()
 
-        updateStatusBar(item)
+        addDebugLog("[PLAY] 戻る → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
+        if (debugPage == 2) updateDebugContent()
+        updateScreenStatusBar(screen)
 
         // nextReady is true (old active already had content)
         nextReady = true
 
         // Schedule next auto-advance
-        val duration = (item.durationSeconds * 1000).toLong()
-        contentTimer = Runnable { advanceToNext() }.also {
-            handler.postDelayed(it, duration)
-        }
+        scheduleAutoAdvance(screen)
 
-        // Preload previous into the recycled WebView
+        // Preload previous into recycled WebView
         prevReady = false
-        scheduleManager.getPreviousItem()?.let { prevItem ->
-            if (prevItem.type != "pdf_folder") {
-                preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
-            } else {
-                prevReady = true  // pdf_folderはprev先読みスキップ（preloadBothDirectionsと同様）
-            }
-        }
+        val prevIdx = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+        preloadScreen(prevWebView!!, flatScreens[prevIdx], isPrevPreload = true)
     }
 
     private fun togglePause() {
         if (!isPlaying) return
 
         isPaused = true
-        val item = scheduleManager.getCurrentItem()
+        val screen = flatScreens.getOrNull(currentScreenIndex)
 
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
-        statusBar.text = formatStatusText(item?.name ?: "", "⏸ 一時停止中 (戻るで再開)")
+        statusBar.text = formatStatusText(screen?.displayName ?: "", "⏸ 一時停止中 (戻るで再開)")
 
         enableWebViewInteraction()
     }
@@ -684,19 +636,11 @@ class PlayerActivity : ComponentActivity() {
         if (!isPlaying || !isPaused) return
 
         isPaused = false
-        val item = scheduleManager.getCurrentItem()
+        val screen = flatScreens.getOrNull(currentScreenIndex) ?: return
 
         disableWebViewInteraction()
-
-        if (item != null) {
-            updateStatusBar(item)
-            val duration = (item.durationSeconds * 1000).toLong()
-            contentTimer = Runnable { advanceToNext() }.also {
-                handler.postDelayed(it, duration)
-            }
-        }
-
-        // Re-preload next and prev after pause (content may have changed)
+        updateScreenStatusBar(screen)
+        scheduleAutoAdvance(screen)
         preloadBothDirections()
     }
 
@@ -896,9 +840,8 @@ class PlayerActivity : ComponentActivity() {
 
         val types = schedule.playlist.groupBy { it.type }.mapValues { it.value.size }
         addDebugLog("[PLAY] スケジュール取得OK: ${schedule.playlist.size}件 $types")
-        // pdf_folderアイテムのフィールドをダンプ（デバッグ用）
         schedule.playlist.filter { it.type == "pdf_folder" }.forEach { pf ->
-            addDebugLog("[PLAY] pdf_folder: name=${pf.name} smbPath=${pf.smbPath} user=${pf.smbUsername} pw=${if (pf.smbPassword != null) "set" else "null"} firstPage=${pf.firstPageOnly}")
+            addDebugLog("[PLAY] pdf_folder: name=${pf.name} smbPath=${pf.smbPath} firstPage=${pf.firstPageOnly}")
         }
         withContext(Dispatchers.Main) { statusBar.text = "スケジュール: ${schedule.playlist.size}件 PDFダウンロード中..." }
 
@@ -906,6 +849,23 @@ class PlayerActivity : ComponentActivity() {
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
         pdfCacheManager.cleanupUnused(activeIds)
         pdfRenderCacheManager.cleanupUnused(activeIds)
+
+        // フラットスクリーンリスト構築
+        withContext(Dispatchers.Main) { statusBar.text = "フォルダ同期中..." }
+        val screens = withContext(Dispatchers.IO) { buildFlatScreens(schedule.playlist) }
+        withContext(Dispatchers.Main) {
+            flatScreens = screens
+            currentScreenIndex = 0
+            addDebugLog("[PLAY] フラットリスト構築完了: ${screens.size}画面")
+        }
+
+        if (flatScreens.isEmpty()) {
+            addDebugLog("[PLAY] 表示画面なし → 60秒後にリトライ")
+            withContext(Dispatchers.Main) { statusBar.text = "表示コンテンツなし (60秒後にリトライ)" }
+            showStandby()
+            startScheduleRetry()
+            return
+        }
 
         if (!scheduleManager.isWithinPlayTime()) {
             addDebugLog("[PLAY] 再生時間外 (${schedule.playStartTime}-${schedule.playEndTime}) → standby")
@@ -916,520 +876,231 @@ class PlayerActivity : ComponentActivity() {
         }
 
         addDebugLog("[PLAY] 再生開始")
-        playCurrentContent()
+        displayCurrentScreen()
     }
 
-    private fun playCurrentContent() {
-        val item = scheduleManager.getCurrentItem() ?: run {
-            addDebugLog("[PLAY] getCurrentItem=null")
-            return
-        }
+    /**
+     * フラットスクリーンリストを構築する。
+     * メインプレイリストのpdf_folderをSMBキャッシュから展開し、
+     * デュアルページのペアリングも行う。
+     */
+    private fun buildFlatScreens(playlist: List<PlaylistItem>): List<FlatScreen> {
+        val screens = mutableListOf<FlatScreen>()
 
-        addDebugLog("[PLAY] #${item.displayOrder} type=${item.type} name=${item.name}")
-        if (debugPage == 2) updateDebugContent()
-
-        // pdf_folder タイプの場合は専用フローへ
-        if (item.type == "pdf_folder") {
-            startPdfFolderPlayback(item)
-            return
-        }
-
-        isPlaying = true
-        isPaused = false
-        disableWebViewInteraction()
-        loadContent(activeWebView!!, item)
-        updateStatusBar(item)
-
-        // Schedule next content
-        contentTimer?.let { handler.removeCallbacks(it) }
-
-        // allPagesモード (pdfPageDuration != null かつ pdf_folderの子PDF) の場合:
-        // ページ送りはpdf-viewer.htmlのsetTimeoutチェーンが管理し、
-        // 全ページ完了時にonAllPagesCompleted()で通知される。
-        val isSubAllPages = pdfFolderSubPlaylist != null && item.pdfPageDuration != null
-        if (isSubAllPages) {
-            val safetyDuration = ((item.durationSeconds + 30) * 1000).toLong()
-            contentTimer = Runnable {
-                addDebugLog("[PDF] 安全弁タイマー発火")
-                advanceToNext()
-            }.also {
-                handler.postDelayed(it, safetyDuration)
-            }
-        } else {
-            val duration = (item.durationSeconds * 1000).toLong()
-            contentTimer = Runnable {
-                advanceToNext()
-            }.also {
-                handler.postDelayed(it, duration)
-            }
-        }
-
-        // Preload both next and previous (only for main playlist items)
-        if (pdfFolderSubPlaylist == null) {
-            preloadBothDirections()
-        }
-    }
-
-    // =========================================================================
-    // pdf_folder: SMB同期 → 子PDFサブプレイリスト再生
-    // =========================================================================
-
-    private fun startPdfFolderPlayback(item: PlaylistItem) {
-        val manager = smbPdfManager ?: run {
-            addDebugLog("[SMB] SmbPdfManager未初期化")
-            advanceToNextMain()
-            return
-        }
-
-        // Stop any running timers
-        contentTimer?.let { handler.removeCallbacks(it) }
-        countdownTimer?.let { handler.removeCallbacks(it) }
-        currentPdfFolderItem = item
-
-        addDebugLog("[SMB] フォルダ同期開始: ${item.name}")
-        addDebugLog("[SMB] smbPath=${item.smbPath} user=${item.smbUsername} pw=${if (item.smbPassword != null) "***" else "null"} firstPage=${item.firstPageOnly}")
-        statusBar.text = "SMB同期中: ${item.smbPath ?: "(パス未設定)"}"
-
-        // 1. Show sync status screen
-        activeWebView?.loadUrl("file:///android_asset/sync-status.html")
-
-        // 2. Wait for sync-status.html to load, then start sync
-        activeWebView?.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url?.contains("sync-status.html") == true) {
-                    coroutineScope.launch {
-                        val (subPlaylist, downloadCount) = withContext(Dispatchers.IO) {
-                            manager.syncFolder(item) { progressMsg ->
-                                withContext(Dispatchers.Main) {
-                                    val escaped = progressMsg.replace("'", "\\'")
-                                    activeWebView?.evaluateJavascript(
-                                        "updateSyncStatus('$escaped');", null
-                                    )
-                                    addDebugLog("[SMB] $progressMsg")
-                                }
+        playlist.forEachIndexed { mainIdx, item ->
+            when (item.type) {
+                "web" -> {
+                    screens.add(FlatScreen.fromWeb(item, mainIdx))
+                }
+                "pdf" -> {
+                    val sourceFile = pdfCacheManager.getCachedPdfPath(item.contentId)
+                    screens.add(FlatScreen.fromPdf(item, sourceFile, mainIdx))
+                }
+                "pdf_folder" -> {
+                    // SMBキャッシュからサブプレイリストを構築
+                    val subItems = smbPdfManager?.buildPlaylistFromCache(item)
+                    if (subItems.isNullOrEmpty()) {
+                        // キャッシュなし → SMB同期を試行
+                        try {
+                            val manager = smbPdfManager ?: return@forEachIndexed
+                            val (syncedItems, _) = kotlinx.coroutines.runBlocking {
+                                manager.syncFolder(item) { /* progress ignored */ }
                             }
+                            addFolderScreens(screens, syncedItems, item, mainIdx)
+                        } catch (e: Exception) {
+                            addDebugLog("[SMB] ${item.name} 同期失敗: ${e.message}")
                         }
-
-                        withContext(Dispatchers.Main) {
-                            if (subPlaylist.isEmpty()) {
-                                addDebugLog("[SMB] ${item.name} - ファイルなし")
-                                activeWebView?.evaluateJavascript(
-                                    "showComplete('ファイルが見つかりませんでした');", null
-                                )
-                                handler.postDelayed({
-                                    currentPdfFolderItem = null
-                                    advanceToNextMain()
-                                }, 10_000L)
-                                return@withContext
-                            }
-
-                            if (downloadCount > 0) {
-                                val completeMsg = "同期完了: ${downloadCount}件ダウンロード (全${subPlaylist.size}件)"
-                                activeWebView?.evaluateJavascript(
-                                    "showComplete('$completeMsg');", null
-                                )
-                                addDebugLog("[SMB] 同期完了: ${item.name} - ${downloadCount}件DL / 全${subPlaylist.size}件")
-
-                                handler.postDelayed({
-                                    startSubPlaylist(subPlaylist)
-                                }, 10_000L)
-                            } else {
-                                addDebugLog("[SMB] ${item.name} - ${subPlaylist.size}件 (更新なし)")
-                                startSubPlaylist(subPlaylist)
-                            }
-                        }
+                    } else {
+                        addFolderScreens(screens, subItems, item, mainIdx)
                     }
                 }
             }
         }
+        return screens
     }
 
-    private fun startSubPlaylist(subPlaylist: List<PlaylistItem>) {
-        pdfFolderSubPlaylist = subPlaylist
-        pdfFolderSubIndex = 0
-        subNextReady = false
-
-        val subItem = subPlaylist[0]
-        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
-
-        // 1件目をnextWebViewに先読み（activeWebViewはsync画面を表示中）
-        if (isFirstPageOnly && subItem.isPortrait
-            && subPlaylist.size > 1 && subPlaylist[1].isPortrait) {
-            loadDualPdfContentForPreload(nextWebView!!, subItem, subPlaylist[1])
-        } else {
-            loadSubPdfPreload(nextWebView!!, subItem)
-        }
-
-        addDebugLog("[SMB] 1件目PDF先読み開始")
-        // 先読み完了を待ってWebViewスワップ → 即表示
-        waitAndSwapFirstSubPdf()
-    }
-
-    /** 1件目のサブPDF先読み完了を待ち、WebViewスワップで即表示 */
-    private fun waitAndSwapFirstSubPdf() {
-        if (!subNextReady) {
-            handler.postDelayed({ waitAndSwapFirstSubPdf() }, 200)
-            return
-        }
-
-        addDebugLog("[SMB] 1件目PDF先読み完了 → スワップ表示")
-
-        // WebViewスワップ（sync画面 → 先読み済みPDF）
-        val oldActive = activeWebView
-        activeWebView = nextWebView
-        nextWebView = oldActive
-
-        // クロスフェード
-        activeWebView?.apply {
-            alpha = 0f
-            visibility = View.VISIBLE
-            animate().alpha(1f).setDuration(800).start()
-        }
-        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
-            oldActive.visibility = View.INVISIBLE
-        }?.start()
-
-        // タイマー開始 + 2件目先読み
-        playCurrentSubPdfAfterSwap()
-    }
-
-    private fun playNextSubPdf() {
-        val subList = pdfFolderSubPlaylist ?: return
-        if (pdfFolderSubIndex >= subList.size) {
-            // 全子PDF完了 → メインプレイリストの次へ
-            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
-            pdfFolderSubPlaylist = null
-            pdfFolderSubIndex = 0
-            currentPdfFolderItem = null
-            advanceToNextMain()
-            return
-        }
-
-        val subItem = subList[pdfFolderSubIndex]
-        if (debugPage == 2) updateDebugContent()
-        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
-
-        // firstPageOnly + 縦長PDF + 次のPDFがある場合: 2つのPDFの1ページ目を見開き表示
-        if (isFirstPageOnly && subItem.isPortrait && pdfFolderSubIndex + 1 < subList.size) {
-            val nextSubItem = subList[pdfFolderSubIndex + 1]
-            if (nextSubItem.isPortrait) {
-                // デュアル表示: 2つのPDFを同時ロード
-                isPlaying = true
-                isPaused = false
-                disableWebViewInteraction()
-                loadDualPdfContent(activeWebView!!, subItem, nextSubItem)
-                updateStatusBar(subItem) // 左側のPDF名をステータスバーに表示
-
-                contentTimer?.let { handler.removeCallbacks(it) }
-                val duration = (subItem.durationSeconds * 1000).toLong()
-                contentTimer = Runnable {
-                    contentTimer?.let { handler.removeCallbacks(it) }
-                    countdownTimer?.let { handler.removeCallbacks(it) }
-                    handler.post { advanceToNextSubPdf() }
-                }.also {
-                    handler.postDelayed(it, duration)
-                }
-                preloadNextSubPdf()
-                return
+    /** pdf_folderの子PDFをFlatScreenリストに追加（デュアルペアリング含む） */
+    private fun addFolderScreens(
+        screens: MutableList<FlatScreen>,
+        subItems: List<PlaylistItem>,
+        parentFolder: PlaylistItem,
+        mainIdx: Int
+    ) {
+        val isFirstPageOnly = parentFolder.firstPageOnly == true
+        var i = 0
+        while (i < subItems.size) {
+            val subItem = subItems[i]
+            val sourceFile = smbPdfManager?.getLocalPdfFile(subItem.contentId)
+            if (sourceFile == null) {
+                i++
+                continue
             }
+
+            // デュアルペアリング: firstPageOnly + 縦長 + 次も縦長
+            if (isFirstPageOnly && subItem.isPortrait && i + 1 < subItems.size) {
+                val nextSub = subItems[i + 1]
+                if (nextSub.isPortrait) {
+                    val rightFile = smbPdfManager?.getLocalPdfFile(nextSub.contentId)
+                    if (rightFile != null) {
+                        screens.add(FlatScreen.fromDualPdf(subItem, sourceFile, nextSub, rightFile, parentFolder, mainIdx))
+                        i += 2
+                        continue
+                    }
+                }
+            }
+
+            screens.add(FlatScreen.fromSubPdf(subItem, sourceFile, parentFolder, mainIdx))
+            i++
         }
+    }
+
+    /** 現在のスクリーンを表示する */
+    private fun displayCurrentScreen() {
+        if (flatScreens.isEmpty()) return
+        val screen = flatScreens[currentScreenIndex]
+
+        addDebugLog("[PLAY] ${currentScreenIndex + 1}/${flatScreens.size}: [${screen.type}] ${screen.displayName}")
+        if (debugPage == 2) updateDebugContent()
 
         isPlaying = true
         isPaused = false
         disableWebViewInteraction()
-        loadContent(activeWebView!!, subItem)
-        updateStatusBar(subItem)
 
-        // Schedule next sub-PDF
-        contentTimer?.let { handler.removeCallbacks(it) }
-        val isSubAllPages = subItem.pdfPageDuration != null
-        if (isSubAllPages) {
-            // allPages: onAllPagesCompletedで切替、安全弁タイマー
-            val safetyDuration = ((subItem.durationSeconds + 30) * 1000).toLong()
-            contentTimer = Runnable {
-                addDebugLog("[PDF] 安全弁タイマー発火")
-                advanceToNext()
-            }.also {
-                handler.postDelayed(it, safetyDuration)
-            }
-        } else {
-            // firstPageOnly: duration_seconds秒後に次へ
-            val duration = (subItem.durationSeconds * 1000).toLong()
-            contentTimer = Runnable {
-                advanceToNext()
-            }.also {
-                handler.postDelayed(it, duration)
-            }
-        }
-        preloadNextSubPdf()
+        // コンテンツロード
+        loadScreen(activeWebView!!, screen)
+        updateScreenStatusBar(screen)
+        scheduleAutoAdvance(screen)
+        preloadBothDirections()
     }
 
-    /** 次のサブPDFインデックスを計算（デュアル表示の場合は+2） */
-    private fun calculateNextSubIndex(): Int {
-        val subList = pdfFolderSubPlaylist ?: return 0
-        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
-        val current = pdfFolderSubIndex
-        val currentItem = subList.getOrNull(current) ?: return current + 1
-
-        if (isFirstPageOnly && currentItem.isPortrait
-            && current + 1 < subList.size && subList[current + 1].isPortrait) {
-            return current + 2
-        }
-        return current + 1
-    }
-
-    /** 次のサブPDFをnextWebViewに先読み */
-    private fun preloadNextSubPdf() {
-        val subList = pdfFolderSubPlaylist ?: return
-        subNextReady = false
-
-        val nextIdx = calculateNextSubIndex()
-        if (nextIdx >= subList.size) {
-            subNextReady = true  // 最後のPDF → サブPDF先読み不要
-            // 次のメインアイテムがpdf_folderなら先読み開始（nextWebViewは空いている）
-            scheduleManager.getNextItem()?.let { nextMainItem ->
-                if (nextMainItem.type == "pdf_folder") {
-                    addDebugLog("[SMB] サブPL最終 → 次のpdf_folder先読み開始: ${nextMainItem.name}")
-                    preloadPdfFolder(nextMainItem)
-                }
-            }
-            return
-        }
-
-        val isFirstPageOnly = currentPdfFolderItem?.firstPageOnly == true
-        val nextItem = subList[nextIdx]
-
-        // デュアル表示判定
-        if (isFirstPageOnly && nextItem.isPortrait
-            && nextIdx + 1 < subList.size && subList[nextIdx + 1].isPortrait) {
-            loadDualPdfContentForPreload(nextWebView!!, nextItem, subList[nextIdx + 1])
-        } else {
-            // シングル表示
-            loadSubPdfPreload(nextWebView!!, nextItem)
-        }
-    }
-
-    /** サブPDF先読み用: nextWebViewにPDFをロード */
-    private fun loadSubPdfPreload(webView: WebView, item: PlaylistItem) {
+    /** スクリーンをWebViewにロードする */
+    private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
-        val cachedFile = smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
-        val duration = item.pdfPageDuration ?: 10
-        val firstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+        when (screen.type) {
+            "web" -> {
+                webView.webViewClient = WebViewClient()
+                webView.loadUrl(screen.url ?: return)
+            }
+            "pdf" -> {
+                loadScreenPdf(webView, screen, preloadType = null)
+            }
+            "dual_pdf" -> {
+                loadScreenDualPdf(webView, screen, preloadType = null)
+            }
+        }
+    }
+
+    /** PDF画面のロード（キャッシュチェック付き） */
+    private fun loadScreenPdf(webView: WebView, screen: FlatScreen, preloadType: String?) {
+        val sourceFile = screen.sourceFile ?: File("")
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
 
         // レンダリングキャッシュチェック
-        val cachedImages = pdfRenderCacheManager.getCachedImagePaths(item.contentId)
+        val cachedImages = pdfRenderCacheManager.getCachedImagePaths(screen.contentId)
         if (cachedImages != null && pdfRenderCacheManager.hasCachedRender(
-                item.contentId, cachedFile, screenW, screenH, firstPageOnly)) {
-            addDebugLog("[CACHE] サブPDF キャッシュヒット: ${item.name}")
-            loadCachedPdfViewerForSub(webView, cachedImages, duration, firstPageOnly)
+                screen.contentId, sourceFile, screenW, screenH, screen.firstPageOnly)) {
+            addDebugLog("[CACHE] キャッシュヒット: ${screen.displayName} (${cachedImages.size}画面)")
+            loadCachedPdfViewer(webView, cachedImages, screen.pdfPageDuration ?: screen.durationSeconds, screen.firstPageOnly, preloadType)
             return
         }
 
+        // 通常のPDF.jsフロー
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (url?.contains("pdf-viewer.html") == true) {
-                    loadPdfIntoViewerForSubPreload(webView, cachedFile, item, duration)
+                    loadPdfIntoViewer(webView, sourceFile, screen, preloadType)
                 }
             }
         }
         webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
     }
 
-    /** サブPDF先読み用: Base64注入（subNextReadyはPDF.jsレンダリング完了時にonPageChangedでセット） */
-    private fun loadPdfIntoViewerForSubPreload(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int) {
-        coroutineScope.launch(Dispatchers.IO) {
-            try {
-                val pdfBytes = if (cachedFile.exists()) cachedFile.readBytes() else null
-                if (pdfBytes != null) {
-                    val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
-                    val firstPageOnly = currentPdfFolderItem?.firstPageOnly == true
-                    withContext(Dispatchers.Main) {
-                        // レンダリングキャッシュ: キャプチャ有効化
-                        webView.evaluateJavascript(
-                            "setCaptureInfo(${item.contentId}, true);", null
-                        )
-                        webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', $duration, $firstPageOnly);", null
-                        )
-                        // subNextReadyはセットしない → PDF.jsのonPageChangedコールバックで完了通知
-                        addDebugLog("[SMB] サブPDF Base64注入完了: ${item.name}")
-                    }
-                } else {
-                    withContext(Dispatchers.Main) { subNextReady = true }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) { subNextReady = true }
-            }
-        }
-    }
-
-    /** デュアルPDF先読み用: 2つのPDFの1ページ目を左右に並べてnextWebViewにロード */
-    private fun loadDualPdfContentForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
-        webView.setInitialScale(100)
-
-        // レンダリングキャッシュチェック（デュアル）
+    /** デュアルPDF画面のロード（キャッシュチェック付き） */
+    private fun loadScreenDualPdf(webView: WebView, screen: FlatScreen, preloadType: String?) {
+        val leftFile = screen.sourceFile ?: File("")
+        val rightFile = screen.rightSourceFile ?: File("")
         val screenW = resources.displayMetrics.widthPixels
         val screenH = resources.displayMetrics.heightPixels
-        val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId) ?: File("")
-        val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId) ?: File("")
-        val cachedImages = pdfRenderCacheManager.getCachedDualImagePaths(leftItem.contentId, rightItem.contentId)
+
+        // レンダリングキャッシュチェック
+        val cachedImages = pdfRenderCacheManager.getCachedDualImagePaths(screen.contentId, screen.rightContentId)
         if (cachedImages != null && pdfRenderCacheManager.hasCachedDualRender(
-                leftItem.contentId, rightItem.contentId, leftFile, rightFile, screenW, screenH)) {
-            addDebugLog("[CACHE] デュアルPDF キャッシュヒット: ${leftItem.name}")
-            loadCachedPdfViewerForSub(webView, cachedImages, 10, true)
+                screen.contentId, screen.rightContentId, leftFile, rightFile, screenW, screenH)) {
+            addDebugLog("[CACHE] デュアルPDF キャッシュヒット: ${screen.displayName}")
+            loadCachedPdfViewer(webView, cachedImages, screen.durationSeconds, true, preloadType)
             return
         }
 
+        // 通常のデュアルPDF.jsフロー
+        webView.setInitialScale(100)
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (url?.contains("pdf-viewer.html") == true) {
-                    loadDualPdfIntoViewerForPreload(webView, leftItem, rightItem)
+                    loadDualPdfIntoViewer(webView, screen)
                 }
             }
         }
         webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
     }
 
-    /** デュアルPDF先読み用: Base64注入（subNextReadyはPDF.jsレンダリング完了時にonPageChangedでセット） */
-    private fun loadDualPdfIntoViewerForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+    /** デュアルPDFのBase64注入 */
+    private fun loadDualPdfIntoViewer(webView: WebView, screen: FlatScreen) {
         coroutineScope.launch(Dispatchers.IO) {
             try {
-                val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId)
-                val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId)
-                val leftBytes = leftFile?.takeIf { it.exists() }?.readBytes()
-                val rightBytes = rightFile?.takeIf { it.exists() }?.readBytes()
+                val leftBytes = screen.sourceFile?.takeIf { it.exists() }?.readBytes()
+                val rightBytes = screen.rightSourceFile?.takeIf { it.exists() }?.readBytes()
 
-                // Base64エンコードをIOスレッドで実行（Mainスレッド負荷軽減）
-                val leftBase64 = leftBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
-                val rightBase64 = rightBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
-
-                withContext(Dispatchers.Main) {
-                    if (leftBase64 != null && rightBase64 != null) {
-                        // レンダリングキャッシュ: デュアル用キャプチャ有効化
+                if (leftBytes != null && rightBytes != null) {
+                    val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                    val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
+                    withContext(Dispatchers.Main) {
                         webView.evaluateJavascript(
-                            "setCaptureInfo(${leftItem.contentId}, true, ${rightItem.contentId});", null
+                            "setCaptureInfo(${screen.contentId}, true, ${screen.rightContentId});", null
                         )
                         webView.evaluateJavascript(
                             "loadDualFirstPages('$leftBase64', '$rightBase64');", null
                         )
-                    } else if (leftBase64 != null) {
-                        webView.evaluateJavascript(
-                            "setCaptureInfo(${leftItem.contentId}, true);", null
-                        )
-                        webView.evaluateJavascript(
-                            "loadPdfBase64('$leftBase64', 10, true);", null
-                        )
-                    } else {
-                        // ファイルなし → フォールバック
-                        subNextReady = true
                     }
-                    // subNextReadyはセットしない → PDF.jsのonPageChangedコールバックで完了通知
-                    addDebugLog("[SMB] デュアルPDF Base64注入完了: ${leftItem.name}")
+                } else if (leftBytes != null) {
+                    val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
+                    withContext(Dispatchers.Main) {
+                        webView.evaluateJavascript("setCaptureInfo(${screen.contentId}, true);", null)
+                        webView.evaluateJavascript("loadPdfBase64('$base64', 10, true);", null)
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                handler.post { subNextReady = true }
             }
         }
     }
 
-    /** サブプレイリスト: WebViewスワップで次のPDFへ遷移 */
-    private fun advanceToNextSubPdf() {
-        if (!subNextReady) {
-            // 先読みがまだ完了していない場合は200msごとにリトライ
-            handler.postDelayed({ advanceToNextSubPdf() }, 200)
-            return
-        }
-
-        // 次のインデックスを計算
-        val nextIdx = calculateNextSubIndex()
-
-        // 最終サブPDF完了 → スワップせず直接メインPL進行
-        // (preloadPdfFolderがnextWebViewに次のフォルダを先読み済みの場合、
-        //  ここでスワップするとadvanceToNextMainで再スワップされて元に戻ってしまう)
-        if (nextIdx >= (pdfFolderSubPlaylist?.size ?: 0)) {
-            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
-            pdfFolderSubPlaylist = null
-            pdfFolderSubIndex = 0
-            currentPdfFolderItem = null
-            advanceToNextMain()
-            return
-        }
-
-        // WebViewスワップ（2枚版）
-        val oldActive = activeWebView
-        activeWebView = nextWebView
-        nextWebView = oldActive
-
-        // クロスフェード
-        activeWebView?.apply {
-            alpha = 0f
-            visibility = View.VISIBLE
-            animate().alpha(1f).setDuration(800).start()
-        }
-        oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
-            oldActive.visibility = View.INVISIBLE
-        }?.start()
-
-        // インデックスを進める
-        pdfFolderSubIndex = nextIdx
-
-        // 先読み済みWebViewが表示されている → ロードせずタイマーだけ開始
-        playCurrentSubPdfAfterSwap()
-    }
-
-    /** スワップ後のサブPDF再生: ロードは行わず、タイマー+ステータスバー+先読みのみ */
-    private fun playCurrentSubPdfAfterSwap() {
-        val subList = pdfFolderSubPlaylist ?: return
-        if (pdfFolderSubIndex >= subList.size) {
-            // 全子PDF完了 → メインプレイリストの次へ
-            addDebugLog("[SMB] フォルダ内全PDF表示完了 → 次のメインアイテムへ")
-            pdfFolderSubPlaylist = null
-            pdfFolderSubIndex = 0
-            currentPdfFolderItem = null
-            advanceToNextMain()
-            return
-        }
-
-        val subItem = subList[pdfFolderSubIndex]
-        if (debugPage == 2) updateDebugContent()
-        isPlaying = true
-        isPaused = false
-        disableWebViewInteraction()
-        // ★ loadContent()は呼ばない（先読み済みのWebViewがそのまま表示されている）
-        updateStatusBar(subItem)
-
-        // タイマー設定
+    /** タイマーをスケジュールする */
+    private fun scheduleAutoAdvance(screen: FlatScreen) {
         contentTimer?.let { handler.removeCallbacks(it) }
-        val isSubAllPages = subItem.pdfPageDuration != null
-        if (isSubAllPages) {
-            // allPages: onAllPagesCompletedで切替、安全弁タイマー
-            val safetyDuration = ((subItem.durationSeconds + 30) * 1000).toLong()
+        if (screen.isAllPages) {
+            // allPagesモード: onAllPagesCompletedで切替、安全弁タイマー
+            val safetyDuration = ((screen.durationSeconds + 30) * 1000).toLong()
             contentTimer = Runnable {
                 addDebugLog("[PDF] 安全弁タイマー発火")
                 advanceToNext()
             }.also { handler.postDelayed(it, safetyDuration) }
         } else {
-            // firstPageOnly: duration_seconds秒後に次へ
-            val duration = (subItem.durationSeconds * 1000).toLong()
+            val duration = (screen.durationSeconds * 1000).toLong()
             contentTimer = Runnable { advanceToNext() }
                 .also { handler.postDelayed(it, duration) }
         }
-        preloadNextSubPdf()
     }
 
     // =========================================================================
-    // Advance logic
+    // Advance Logic (フラットスクリーン版)
     // =========================================================================
 
     private fun advanceToNext() {
         if (!isPlaying || isPaused) return
+        if (flatScreens.isEmpty()) return
 
         // 再生時間外チェック
         if (!scheduleManager.isWithinPlayTime()) {
@@ -1437,150 +1108,32 @@ class PlayerActivity : ComponentActivity() {
             contentTimer?.let { handler.removeCallbacks(it) }
             countdownTimer?.let { handler.removeCallbacks(it) }
             isPlaying = false
-            pdfFolderSubPlaylist = null
-            pdfFolderSubIndex = 0
-            currentPdfFolderItem = null
             statusBar.text = "再生時間外 (${scheduleManager.playTimeRange})"
             showStandby()
             startTimeCheck()
             return
         }
 
-        // pdf_folderサブプレイリスト内の場合: WebViewスワップ方式で次の子PDFへ
-        if (pdfFolderSubPlaylist != null) {
-            addDebugLog("[PLAY] advance: sub ${pdfFolderSubIndex+1}/${pdfFolderSubPlaylist?.size}")
-            contentTimer?.let { handler.removeCallbacks(it) }
-            countdownTimer?.let { handler.removeCallbacks(it) }
-            handler.post { advanceToNextSubPdf() }
-            return
-        }
-
-        // 通常のメインプレイリスト進行（スケジュール更新はSignageServiceが管理）
         handler.post { doAdvance() }
-    }
-
-    /** メインプレイリストを強制的に次のアイテムへ進める（pdf_folder完了時等） */
-    private fun advanceToNextMain() {
-        contentTimer?.let { handler.removeCallbacks(it) }
-        countdownTimer?.let { handler.removeCallbacks(it) }
-        scheduleManager.advanceToNext()
-        val item = scheduleManager.getCurrentItem()
-
-        // 先読み済みpdf_folderなら即スワップ表示
-        if (item != null && item.type == "pdf_folder") {
-            val preloadedSub = preloadedPdfFolderSubPlaylist
-            if (preloadedSub != null && preloadedSub.isNotEmpty() && nextReady) {
-                addDebugLog("[SMB] pdf_folder先読み済み → 即表示 (${preloadedSub.size}件)")
-
-                // nextWebViewに先読みPDFが入っているのでスワップ
-                val oldActive = activeWebView
-                activeWebView = nextWebView
-                nextWebView = oldActive
-
-                // クロスフェード
-                activeWebView?.apply {
-                    alpha = 0f
-                    visibility = View.VISIBLE
-                    animate().alpha(1f).setDuration(800).start()
-                }
-                oldActive?.animate()?.alpha(0f)?.setDuration(800)?.withEndAction {
-                    oldActive.visibility = View.INVISIBLE
-                }?.start()
-
-                currentPdfFolderItem = preloadedPdfFolderItem ?: item
-                pdfFolderSubPlaylist = preloadedSub
-                pdfFolderSubIndex = 0
-                preloadedPdfFolderSubPlaylist = null
-                preloadedPdfFolderItem = null
-                nextReady = false
-                playCurrentSubPdfAfterSwap()
-                return
-            }
-        }
-
-        playCurrentContent()  // 従来フロー（先読み未完了 or 非pdf_folder）
-    }
-
-    private fun preloadBothDirections() {
-        nextReady = false
-        prevReady = false
-        scheduleManager.getNextItem()?.let { nextItem ->
-            if (nextItem.type != "pdf_folder") {
-                preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
-            } else {
-                preloadPdfFolder(nextItem) // Webページ表示中にSMB同期+PDF先読み
-            }
-        }
-        scheduleManager.getPreviousItem()?.let { prevItem ->
-            if (prevItem.type != "pdf_folder") {
-                preloadContent(prevWebView!!, prevItem, isPrevPreload = true)
-            } else {
-                prevReady = true
-            }
-        }
-    }
-
-    /** pdf_folder先読み: Webページ表示中にSMB同期+1件目PDFをnextWebViewにレンダリング */
-    private fun preloadPdfFolder(item: PlaylistItem) {
-        val manager = smbPdfManager ?: run {
-            nextReady = true
-            return
-        }
-        // nextReady = false のまま（先読み完了時にセット）
-        preloadedPdfFolderSubPlaylist = null
-        preloadedPdfFolderItem = item
-
-        addDebugLog("[SMB] pdf_folder先読み開始: ${item.name}")
-
-        coroutineScope.launch {
-            val (subPlaylist, _) = withContext(Dispatchers.IO) {
-                manager.syncFolder(item) { progressMsg ->
-                    withContext(Dispatchers.Main) {
-                        addDebugLog("[SMB] (先読み) $progressMsg")
-                    }
-                }
-            }
-
-            withContext(Dispatchers.Main) {
-                if (subPlaylist.isEmpty()) {
-                    addDebugLog("[SMB] pdf_folder先読み: ファイルなし")
-                    preloadedPdfFolderSubPlaylist = emptyList()
-                    nextReady = true
-                    return@withContext
-                }
-
-                // サブプレイリストを保存
-                preloadedPdfFolderSubPlaylist = subPlaylist
-                addDebugLog("[SMB] pdf_folder先読み: ${subPlaylist.size}件 → 1件目PDF先読み開始")
-
-                // 1件目PDFをnextWebViewに先読み
-                val subItem = subPlaylist[0]
-                val isFirstPageOnly = item.firstPageOnly == true
-
-                if (isFirstPageOnly && subItem.isPortrait
-                    && subPlaylist.size > 1 && subPlaylist[1].isPortrait) {
-                    loadDualPdfContentForPreload(nextWebView!!, subItem, subPlaylist[1])
-                } else {
-                    loadSubPdfPreload(nextWebView!!, subItem)
-                }
-                // レンダリング完了はonPageChangedコールバックでnextReady=trueにセット
-            }
-        }
     }
 
     private fun doAdvance() {
         if (!isPlaying || isPaused) return
+        if (flatScreens.isEmpty()) return
 
         if (!nextReady) {
             handler.postDelayed({ doAdvance() }, 200)
             return
         }
 
-        // Rotate: active→prev, next→active, prev→next
+        // インデックス進める
+        currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
+        val screen = flatScreens[currentScreenIndex]
+
+        // WebViewローテーション: next→active, active→prev, prev→next
         val oldActive = activeWebView
         val oldNext = nextWebView
         val oldPrev = prevWebView
-
         activeWebView = oldNext
         prevWebView = oldActive
         nextWebView = oldPrev
@@ -1595,174 +1148,37 @@ class PlayerActivity : ComponentActivity() {
             oldActive.visibility = View.INVISIBLE
         }?.start()
 
-        // Advance schedule
-        scheduleManager.advanceToNext()
-        val item = scheduleManager.getCurrentItem() ?: return
-
-        // pdf_folder の場合: 先読み済みなら即サブPL開始、未完了なら従来フロー
-        if (item.type == "pdf_folder") {
-            val preloadedSub = preloadedPdfFolderSubPlaylist
-            if (preloadedSub != null && preloadedSub.isNotEmpty()) {
-                // 先読み完了済み → sync画面不要、即サブPL開始
-                addDebugLog("[SMB] pdf_folder先読み済み → 即表示 (${preloadedSub.size}件)")
-                currentPdfFolderItem = preloadedPdfFolderItem ?: item
-                pdfFolderSubPlaylist = preloadedSub
-                pdfFolderSubIndex = 0
-                preloadedPdfFolderSubPlaylist = null
-                preloadedPdfFolderItem = null
-                // activeWebViewには先読み済みPDFが表示されている（doAdvanceのスワップ済み）
-                playCurrentSubPdfAfterSwap()
-            } else {
-                // 先読み未完了 → 従来フロー
-                startPdfFolderPlayback(item)
-            }
-            return
-        }
-
-        updateStatusBar(item)
+        addDebugLog("[PLAY] advance → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
+        if (debugPage == 2) updateDebugContent()
+        updateScreenStatusBar(screen)
 
         // prevReady is true (old active already had content)
         prevReady = true
 
         // Schedule next auto-advance
-        contentTimer?.let { handler.removeCallbacks(it) }
-        val duration = (item.durationSeconds * 1000).toLong()
-        contentTimer = Runnable {
-            advanceToNext()
-        }.also {
-            handler.postDelayed(it, duration)
-        }
+        scheduleAutoAdvance(screen)
 
         // Preload next into recycled WebView
         nextReady = false
-        scheduleManager.getNextItem()?.let { nextItem ->
-            if (nextItem.type != "pdf_folder") {
-                preloadContent(nextWebView!!, nextItem, isPrevPreload = false)
-            } else {
-                preloadPdfFolder(nextItem) // Webページ表示中にSMB同期+PDF先読み
-            }
-        }
+        val nextIdx = (currentScreenIndex + 1) % flatScreens.size
+        preloadScreen(nextWebView!!, flatScreens[nextIdx], isPrevPreload = false)
     }
 
-    // =========================================================================
-    // Content Loading
-    // =========================================================================
-
-    private fun loadContent(webView: WebView, item: PlaylistItem) {
-        loadContentInternal(webView, item, preloadType = null)
+    private fun preloadBothDirections() {
+        if (flatScreens.isEmpty()) return
+        nextReady = false
+        prevReady = false
+        val nextIdx = (currentScreenIndex + 1) % flatScreens.size
+        val prevIdx = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+        preloadScreen(nextWebView!!, flatScreens[nextIdx], isPrevPreload = false)
+        preloadScreen(prevWebView!!, flatScreens[prevIdx], isPrevPreload = true)
     }
 
-    /**
-     * 2つのPDFの1ページ目を左右に並べて表示する（firstPageOnly + 縦長PDF見開き表示）。
-     */
-    private fun loadDualPdfContent(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
+    /** スクリーンを先読みWebViewにロード */
+    private fun preloadScreen(webView: WebView, screen: FlatScreen, isPrevPreload: Boolean) {
+        val preloadType = if (isPrevPreload) "prev" else "next"
         webView.setInitialScale(100)
-
-        // レンダリングキャッシュチェック（デュアル直接表示）
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
-        val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId) ?: File("")
-        val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId) ?: File("")
-        val cachedImages = pdfRenderCacheManager.getCachedDualImagePaths(leftItem.contentId, rightItem.contentId)
-        if (cachedImages != null && pdfRenderCacheManager.hasCachedDualRender(
-                leftItem.contentId, rightItem.contentId, leftFile, rightFile, screenW, screenH)) {
-            addDebugLog("[CACHE] デュアルPDF キャッシュヒット(直接): ${leftItem.name}")
-            loadCachedPdfViewerForSub(webView, cachedImages, 10, true)
-            return
-        }
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url?.contains("pdf-viewer.html") == true) {
-                    loadDualPdfIntoViewer(webView, leftItem, rightItem)
-                }
-            }
-        }
-        webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
-    }
-
-    private fun loadDualPdfIntoViewer(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
-        coroutineScope.launch(Dispatchers.IO) {
-            try {
-                val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId)
-                val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId)
-
-                val leftBytes = leftFile?.takeIf { it.exists() }?.readBytes()
-                val rightBytes = rightFile?.takeIf { it.exists() }?.readBytes()
-
-                if (leftBytes != null && rightBytes != null) {
-                    val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
-                    val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
-                    withContext(Dispatchers.Main) {
-                        // レンダリングキャッシュ: デュアル用キャプチャ有効化
-                        webView.evaluateJavascript(
-                            "setCaptureInfo(${leftItem.contentId}, true, ${rightItem.contentId});", null
-                        )
-                        webView.evaluateJavascript(
-                            "loadDualFirstPages('$leftBase64', '$rightBase64');",
-                            null
-                        )
-                    }
-                } else if (leftBytes != null) {
-                    // 右側がない場合はシングル表示にフォールバック
-                    val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
-                    withContext(Dispatchers.Main) {
-                        webView.evaluateJavascript(
-                            "setCaptureInfo(${leftItem.contentId}, true);", null
-                        )
-                        webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', 10, true);",
-                            null
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun preloadContent(webView: WebView, item: PlaylistItem, isPrevPreload: Boolean) {
-        loadContentInternal(webView, item, preloadType = if (isPrevPreload) "prev" else "next")
-    }
-
-    private fun loadContentInternal(webView: WebView, item: PlaylistItem, preloadType: String?) {
-        webView.setInitialScale(100)
-        when (item.type) {
-            "pdf" -> {
-                // pdf_folderの子PDFの場合はSmbPdfManagerから取得
-                val cachedFile = if (pdfFolderSubPlaylist != null) {
-                    smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
-                } else {
-                    pdfCacheManager.getCachedPdfPath(item.contentId)
-                }
-                val duration = item.pdfPageDuration ?: 10
-                val firstPageOnly = if (pdfFolderSubPlaylist != null) {
-                    currentPdfFolderItem?.firstPageOnly == true
-                } else false
-                val screenW = resources.displayMetrics.widthPixels
-                val screenH = resources.displayMetrics.heightPixels
-
-                // レンダリングキャッシュチェック
-                val cachedImages = pdfRenderCacheManager.getCachedImagePaths(item.contentId)
-                if (cachedImages != null && pdfRenderCacheManager.hasCachedRender(
-                        item.contentId, cachedFile, screenW, screenH, firstPageOnly)) {
-                    addDebugLog("[CACHE] キャッシュヒット: ${item.name} (${cachedImages.size}画面)")
-                    loadCachedPdfViewer(webView, cachedImages, duration, firstPageOnly, preloadType)
-                    return
-                }
-
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        if (url?.contains("pdf-viewer.html") == true) {
-                            loadPdfIntoViewer(webView, cachedFile, item, duration, preloadType)
-                        }
-                    }
-                }
-                webView.loadUrl("file:///android_asset/pdfjs/pdf-viewer.html")
-            }
+        when (screen.type) {
             "web" -> {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -1770,16 +1186,31 @@ class PlayerActivity : ComponentActivity() {
                         markPreloadReady(preloadType)
                     }
                 }
-                val url = item.url ?: return
-                webView.loadUrl(url)
+                webView.loadUrl(screen.url ?: return)
+            }
+            "pdf" -> {
+                loadScreenPdf(webView, screen, preloadType)
+            }
+            "dual_pdf" -> {
+                loadScreenDualPdf(webView, screen, preloadType)
             }
         }
     }
 
-    /**
-     * レンダリングキャッシュ済みPDFの高速表示。
-     * pdf-viewer.htmlの代わりにcached-pdf-viewer.htmlで画像を直接表示する。
-     */
+    /** ステータスバーを更新 */
+    private fun updateScreenStatusBar(screen: FlatScreen) {
+        isAllPagesMode = screen.isAllPages
+        pdfPageDurationSec = screen.pdfPageDuration ?: 10
+        remainingSeconds = screen.durationSeconds
+        startCountdown()
+    }
+
+    // =========================================================================
+    // Content Loading
+    // =========================================================================
+
+    // --- Content Loading Helpers ---
+
     private fun loadCachedPdfViewer(
         webView: WebView,
         imagePaths: List<File>,
@@ -1808,37 +1239,6 @@ class PlayerActivity : ComponentActivity() {
         webView.loadUrl("file:///android_asset/pdfjs/cached-pdf-viewer.html")
     }
 
-    /**
-     * サブプレイリスト用キャッシュ表示。subNextReadyをセットする。
-     */
-    private fun loadCachedPdfViewerForSub(
-        webView: WebView,
-        imagePaths: List<File>,
-        duration: Int,
-        firstPageOnly: Boolean
-    ) {
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                if (url?.contains("cached-pdf-viewer.html") == true) {
-                    if (firstPageOnly || imagePaths.size == 1) {
-                        webView.evaluateJavascript(
-                            "loadCachedFirstPage('file://${imagePaths[0].absolutePath}');", null
-                        )
-                    } else {
-                        val pathsJson = imagePaths.joinToString(",") { "\"${it.absolutePath}\"" }
-                        webView.evaluateJavascript(
-                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1);", null
-                        )
-                    }
-                    // サブPL先読みのready通知はonPageChangedコールバック経由
-                    // cached-pdf-viewerでもonPageChangedが呼ばれるため自動でsubNextReady=trueになる
-                }
-            }
-        }
-        webView.loadUrl("file:///android_asset/pdfjs/cached-pdf-viewer.html")
-    }
-
     private fun markPreloadReady(preloadType: String?) {
         when (preloadType) {
             "next" -> nextReady = true
@@ -1846,45 +1246,36 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun loadPdfIntoViewer(webView: WebView, cachedFile: File, item: PlaylistItem, duration: Int, preloadType: String?) {
+    /** PDFのBase64注入 (FlatScreen版) */
+    private fun loadPdfIntoViewer(webView: WebView, cachedFile: File, screen: FlatScreen, preloadType: String?) {
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val pdfBytes = if (cachedFile.exists()) {
                     cachedFile.readBytes()
-                } else if (pdfFolderSubPlaylist == null) {
-                    // 通常PDF: サーバーからダウンロード試行
-                    pdfCacheManager.downloadIfNeeded(item)
-                    if (cachedFile.exists()) cachedFile.readBytes() else null
                 } else {
-                    null
+                    // サーバーPDFの場合ダウンロード試行
+                    screen.item?.let { pdfCacheManager.downloadIfNeeded(it) }
+                    if (cachedFile.exists()) cachedFile.readBytes() else null
                 }
 
                 if (pdfBytes != null) {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
-                    val firstPageOnly = if (pdfFolderSubPlaylist != null) {
-                        currentPdfFolderItem?.firstPageOnly == true
-                    } else false
+                    val duration = screen.pdfPageDuration ?: 10
                     withContext(Dispatchers.Main) {
-                        // レンダリングキャッシュ: キャプチャ有効化（loadPdfBase64の前に呼ぶ）
                         webView.evaluateJavascript(
-                            "setCaptureInfo(${item.contentId}, true);", null
+                            "setCaptureInfo(${screen.contentId}, true);", null
                         )
                         webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', $duration, $firstPageOnly);",
-                            null
+                            "loadPdfBase64('$base64', $duration, ${screen.firstPageOnly});", null
                         )
                         markPreloadReady(preloadType)
                     }
                 } else {
-                    withContext(Dispatchers.Main) {
-                        markPreloadReady(preloadType)
-                    }
+                    withContext(Dispatchers.Main) { markPreloadReady(preloadType) }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                withContext(Dispatchers.Main) {
-                    markPreloadReady(preloadType)
-                }
+                withContext(Dispatchers.Main) { markPreloadReady(preloadType) }
             }
         }
     }
@@ -1893,13 +1284,24 @@ class PlayerActivity : ComponentActivity() {
         activeWebView?.loadUrl("file:///android_asset/standby.html")
     }
 
+    // --- Removed legacy sub-playlist functions ---
+    // startPdfFolderPlayback, startSubPlaylist, waitAndSwapFirstSubPdf,
+    // playNextSubPdf, calculateNextSubIndex, preloadNextSubPdf,
+    // loadSubPdfPreload, loadPdfIntoViewerForSubPreload,
+    // loadDualPdfContentForPreload, loadDualPdfIntoViewerForPreload,
+    // advanceToNextSubPdf, playCurrentSubPdfAfterSwap,
+    // advanceToNextMain, preloadPdfFolder,
+    // loadContent, loadDualPdfContent, preloadContent, loadContentInternal,
+    // loadCachedPdfViewerForSub, old loadPdfIntoViewer, old loadDualPdfIntoViewer
+    // All replaced by flat screen architecture above.
+
     private fun startTimeCheck() {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 // スケジュール更新はSignageServiceが管理、ここでは再生時間のみチェック
                 if (scheduleManager.isWithinPlayTime()) {
                     addDebugLog("[TIME] 再生時間内になった → 再生開始")
-                    playCurrentContent()
+                    displayCurrentScreen()
                 } else {
                     handler.postDelayed(this, 60_000)
                 }
@@ -1941,22 +1343,6 @@ class PlayerActivity : ComponentActivity() {
     // Status Bar & Countdown
     // =========================================================================
 
-    private fun updateStatusBar(item: PlaylistItem) {
-        currentPdfPage = 0
-        totalPdfPages = 0
-        isAllPagesMode = pdfFolderSubPlaylist != null && item.pdfPageDuration != null
-        pdfPageDurationSec = item.pdfPageDuration ?: 10
-
-        if (isAllPagesMode) {
-            remainingSeconds = pdfPageDurationSec
-            statusBar.text = "${item.name}  |  次のページまで: ${remainingSeconds}秒"
-        } else {
-            remainingSeconds = item.durationSeconds
-            statusBar.text = "${item.name}  |  次の切替まで: ${remainingSeconds}秒"
-        }
-        startCountdown()
-    }
-
     private fun formatStatusText(itemName: String, suffix: String): String {
         val pageInfo = if (totalPdfPages > 1) " ($currentPdfPage/$totalPdfPages)" else ""
         return "$itemName$pageInfo  |  $suffix"
@@ -1968,14 +1354,10 @@ class PlayerActivity : ComponentActivity() {
             override fun run() {
                 remainingSeconds--
                 if (remainingSeconds >= 0) {
-                    val item = if (pdfFolderSubPlaylist != null && pdfFolderSubIndex < (pdfFolderSubPlaylist?.size ?: 0)) {
-                        pdfFolderSubPlaylist!![pdfFolderSubIndex]
-                    } else {
-                        scheduleManager.getCurrentItem()
-                    }
+                    val screen = flatScreens.getOrNull(currentScreenIndex)
                     val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                     statusBar.text = formatStatusText(
-                        item?.name ?: "",
+                        screen?.displayName ?: "",
                         "$label: ${remainingSeconds}秒"
                     )
                     handler.postDelayed(this, 1000)
@@ -2037,20 +1419,16 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPageChanged(current: Int, total: Int) {
             handler.post {
-                // pdf_folder先読み（preloadPdfFolder）: nextWebViewでのレンダリング完了
-                if (webView != activeWebView && preloadedPdfFolderSubPlaylist != null && !nextReady) {
+                // 先読みWebViewからのレンダリング完了通知
+                if (webView != activeWebView && !nextReady) {
                     nextReady = true
-                    addDebugLog("[SMB] pdf_folder先読みレンダリング完了 (page $current/$total)")
+                    addDebugLog("[PRELOAD] 先読みレンダリング完了 (page $current/$total)")
                     return@post
                 }
-
-                // サブPDF先読みWebViewからのレンダリング完了通知
-                if (webView != activeWebView && pdfFolderSubPlaylist != null && !subNextReady) {
-                    subNextReady = true
-                    addDebugLog("[SMB] サブPDF先読みレンダリング完了 (page $current/$total)")
+                if (webView != activeWebView && !prevReady) {
+                    prevReady = true
                     return@post
                 }
-
                 if (webView != activeWebView) return@post
 
                 currentPdfPage = current
@@ -2062,19 +1440,15 @@ class PlayerActivity : ComponentActivity() {
                     startCountdown()
                 }
 
-                val item = if (pdfFolderSubPlaylist != null && pdfFolderSubIndex < (pdfFolderSubPlaylist?.size ?: 0)) {
-                    pdfFolderSubPlaylist!![pdfFolderSubIndex]
-                } else {
-                    scheduleManager.getCurrentItem()
-                }
-                if (item != null) {
+                val screen = flatScreens.getOrNull(currentScreenIndex)
+                if (screen != null) {
                     val suffix = if (isPaused) {
                         "⏸ 一時停止中 (戻るで再開)"
                     } else {
                         val label = if (isAllPagesMode) "次のページまで" else "次の切替まで"
                         "$label: ${remainingSeconds}秒"
                     }
-                    statusBar.text = formatStatusText(item.name, suffix)
+                    statusBar.text = formatStatusText(screen.displayName, suffix)
                 }
             }
         }
@@ -2095,16 +1469,13 @@ class PlayerActivity : ComponentActivity() {
                     val base64Data = dataUrl.substringAfter("base64,")
                     val jpegBytes = Base64.decode(base64Data, Base64.DEFAULT)
 
-                    // ソースPDFファイルを特定
-                    val sourceFile = if (pdfFolderSubPlaylist != null) {
-                        smbPdfManager?.getLocalPdfFile(contentId) ?: File("")
-                    } else {
-                        pdfCacheManager.getCachedPdfPath(contentId)
-                    }
+                    // ソースPDFファイルを特定（フラットスクリーンから）
+                    val screen = flatScreens.getOrNull(currentScreenIndex)
+                    val sourceFile = screen?.sourceFile
+                        ?: smbPdfManager?.getLocalPdfFile(contentId)
+                        ?: pdfCacheManager.getCachedPdfPath(contentId)
 
-                    val firstPageOnly = if (pdfFolderSubPlaylist != null) {
-                        currentPdfFolderItem?.firstPageOnly == true
-                    } else false
+                    val firstPageOnly = screen?.firstPageOnly ?: false
 
                     val screenW = resources.displayMetrics.widthPixels
                     val screenH = resources.displayMetrics.heightPixels
