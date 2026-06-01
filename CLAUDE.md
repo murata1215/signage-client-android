@@ -15,6 +15,7 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **PDF 2キャンバススワップ**: ページ切替時のちらつき防止(canvas A/B交互表示)
 - **PDFデュアルページ**: A4縦PDFを自動判定し見開き表示(allPages: 同一PDF内2ページ並べ / firstPageOnly: 異なるPDFの1ページ目同士を並べ)
 - **PDF高解像度レンダリング**: devicePixelRatio対応でシャープ表示(canvas解像度=物理ピクセル、CSS表示=論理ピクセル)
+- **PDFレンダリングキャッシュ**: 初回表示時にcanvasをJPEGキャプチャ→保存、2回目以降はcached-pdf-viewer.htmlで画像直接表示(PDF.jsスキップで爆速)
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
 - **サブプレイリスト先読み**: pdf_folderの子PDFもnextWebViewに先読み+WebViewスワップで即表示(1件目は同期画面の裏で先読み)
 - **pdf_folder先読み**: Webページ/サブPL表示中にバックグラウンドでSMB同期+1件目PDFレンダリング完了(Web→folder, folder→folder共に即切替)
@@ -42,6 +43,7 @@ jp.co.tisa.signage_android/
 │   ├── PlayerActivity.kt    # WebView再生画面(フルスクリーン)
 │   ├── ScheduleManager.kt   # スケジュール取得・ポーリング・時間帯判定
 │   ├── PdfCacheManager.kt   # PDFダウンロード・キャッシュ管理
+│   ├── PdfRenderCacheManager.kt # PDFレンダリング済み画像キャッシュ(JPEG)
 │   └── SmbPdfManager.kt     # SMB共有フォルダPDF取得・キャッシュ・サブプレイリスト生成
 ├── service/
 │   ├── SignageService.kt     # Foreground Service(ハートビート + アップデート + スケジュール更新チェック)
@@ -91,6 +93,7 @@ jp.co.tisa.signage_android/
 - SMB PDFフォルダ命名規約: parseFileNameConfig()でファイル名パース、規約ファイルはsortOrder順+日付フィルタ+個別firstPageOnly/duration、規約外は親アイテムのデフォルト設定で後方配置
 - デバッグオーバーレイ4ページ: debugPage(0-4)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新、ページ4は命名規約マニュアル(静的)
 - SignageServiceからACTION_HEARTBEAT Broadcast送信、PlayerActivityで受信して最終HB時刻記録
+- PDFレンダリングキャッシュ: PDF.jsレンダリング後にcanvas.toDataURL('image/jpeg', 0.85)でキャプチャ→onPageRendered()でAndroidに送信→JPEG保存。2回目以降はcached-pdf-viewer.htmlで<img>表示(PDF.jsパース+レンダリング完全スキップ)。キャッシュ検証はPDFファイルサイズ/更新日時+画面解像度
 
 ## Release Checklist
 コード変更をリリースする際は、以下を**必ず全て**実行すること：

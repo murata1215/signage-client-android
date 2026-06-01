@@ -1,0 +1,228 @@
+package jp.co.tisa.signage_android.player
+
+import android.content.Context
+import com.google.gson.Gson
+import java.io.File
+
+/**
+ * PDF.jsレンダリング済みキャンバスをJPEG画像としてキャッシュし、
+ * 2回目以降はPDF.jsを経由せず画像表示で高速化する。
+ *
+ * キャッシュ構造:
+ *   filesDir/pdf_render_cache/{contentId}/
+ *     meta.json   - 検証用メタデータ
+ *     s0.jpg      - スクリーン0
+ *     s1.jpg      - スクリーン1 ...
+ */
+class PdfRenderCacheManager(context: Context) {
+
+    private val cacheDir = File(context.filesDir, "pdf_render_cache").apply {
+        if (!exists()) mkdirs()
+    }
+
+    private val gson = Gson()
+
+    // =========================================================================
+    // Cache key
+    // =========================================================================
+
+    /** 単一PDFのキャッシュディレクトリ */
+    fun getCacheDir(contentId: Int): File = File(cacheDir, contentId.toString())
+
+    /** デュアル初ページ（2つの異なるPDF）のキャッシュディレクトリ */
+    fun getDualCacheDir(leftContentId: Int, rightContentId: Int): File =
+        File(cacheDir, "dual_${leftContentId}_${rightContentId}")
+
+    // =========================================================================
+    // Validation
+    // =========================================================================
+
+    /**
+     * 有効なレンダリングキャッシュが存在するかチェック。
+     * PDFファイルのサイズ・更新日時、画面解像度が一致し、
+     * 全スクリーン画像が揃っている場合のみtrue。
+     */
+    fun hasCachedRender(
+        contentId: Int,
+        sourceFile: File,
+        screenWidth: Int,
+        screenHeight: Int,
+        firstPageOnly: Boolean
+    ): Boolean {
+        return hasCachedRenderInDir(getCacheDir(contentId), sourceFile, screenWidth, screenHeight, firstPageOnly)
+    }
+
+    fun hasCachedDualRender(
+        leftContentId: Int,
+        rightContentId: Int,
+        leftFile: File,
+        rightFile: File,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Boolean {
+        val dir = getDualCacheDir(leftContentId, rightContentId)
+        val meta = loadMeta(dir) ?: return false
+
+        // デュアルの場合、両方のソースファイルをチェック
+        if (meta.sourceFileSize != leftFile.length() || meta.sourceFileSize2 != rightFile.length()) return false
+        if (meta.sourceLastModified != leftFile.lastModified() || meta.sourceLastModified2 != rightFile.lastModified()) return false
+        if (meta.screenWidth != screenWidth || meta.screenHeight != screenHeight) return false
+        if (meta.totalScreens < 1) return false
+
+        // 全画像ファイル存在チェック
+        for (i in 0 until meta.totalScreens) {
+            if (!getScreenFile(dir, i).exists()) return false
+        }
+        return true
+    }
+
+    private fun hasCachedRenderInDir(
+        dir: File,
+        sourceFile: File,
+        screenWidth: Int,
+        screenHeight: Int,
+        firstPageOnly: Boolean
+    ): Boolean {
+        val meta = loadMeta(dir) ?: return false
+
+        if (!sourceFile.exists()) return false
+        if (meta.sourceFileSize != sourceFile.length()) return false
+        if (meta.sourceLastModified != sourceFile.lastModified()) return false
+        if (meta.screenWidth != screenWidth || meta.screenHeight != screenHeight) return false
+        if (meta.firstPageOnly != firstPageOnly) return false
+        if (meta.totalScreens < 1) return false
+
+        // 全画像ファイル存在チェック
+        for (i in 0 until meta.totalScreens) {
+            if (!getScreenFile(dir, i).exists()) return false
+        }
+        return true
+    }
+
+    // =========================================================================
+    // Read
+    // =========================================================================
+
+    /** キャッシュ済み画像パスのリストを返す。未完成ならnull */
+    fun getCachedImagePaths(contentId: Int): List<File>? {
+        return getCachedImagePathsInDir(getCacheDir(contentId))
+    }
+
+    fun getCachedDualImagePaths(leftContentId: Int, rightContentId: Int): List<File>? {
+        return getCachedImagePathsInDir(getDualCacheDir(leftContentId, rightContentId))
+    }
+
+    private fun getCachedImagePathsInDir(dir: File): List<File>? {
+        val meta = loadMeta(dir) ?: return null
+        val files = (0 until meta.totalScreens).map { getScreenFile(dir, it) }
+        return if (files.all { it.exists() }) files else null
+    }
+
+    // =========================================================================
+    // Write
+    // =========================================================================
+
+    /**
+     * レンダリング済みスクリーンのJPEGバイトを保存。
+     * 全スクリーンが揃った時点でメタデータも書き込む。
+     */
+    fun saveRenderedScreen(
+        cacheKey: String,
+        screenIndex: Int,
+        totalScreens: Int,
+        jpegBytes: ByteArray,
+        sourceFile: File,
+        screenWidth: Int,
+        screenHeight: Int,
+        firstPageOnly: Boolean,
+        sourceFile2: File? = null  // デュアル用
+    ) {
+        try {
+            val dir = File(cacheDir, cacheKey)
+            if (!dir.exists()) dir.mkdirs()
+
+            // JPEG保存
+            getScreenFile(dir, screenIndex).writeBytes(jpegBytes)
+
+            // 全スクリーンが揃ったらメタデータ保存
+            val allExist = (0 until totalScreens).all { getScreenFile(dir, it).exists() }
+            if (allExist) {
+                val meta = RenderCacheMeta(
+                    sourceFileSize = sourceFile.length(),
+                    sourceLastModified = sourceFile.lastModified(),
+                    sourceFileSize2 = sourceFile2?.length() ?: 0,
+                    sourceLastModified2 = sourceFile2?.lastModified() ?: 0,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight,
+                    totalScreens = totalScreens,
+                    firstPageOnly = firstPageOnly,
+                    createdAt = System.currentTimeMillis()
+                )
+                saveMeta(dir, meta)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // =========================================================================
+    // Cleanup
+    // =========================================================================
+
+    /** アクティブでないcontentIdのキャッシュを削除 */
+    fun cleanupUnused(activeContentIds: Set<Int>) {
+        cacheDir.listFiles()?.forEach { dir ->
+            if (!dir.isDirectory) return@forEach
+            // "dual_xxx_yyy" ディレクトリは個別判定
+            if (dir.name.startsWith("dual_")) {
+                val parts = dir.name.removePrefix("dual_").split("_")
+                val ids = parts.mapNotNull { it.toIntOrNull() }
+                if (ids.none { it in activeContentIds }) {
+                    dir.deleteRecursively()
+                }
+            } else {
+                val id = dir.name.toIntOrNull()
+                if (id != null && id !in activeContentIds) {
+                    dir.deleteRecursively()
+                }
+            }
+        }
+    }
+
+    /** 指定contentIdのキャッシュを無効化 */
+    fun invalidate(contentId: Int) {
+        getCacheDir(contentId).let { if (it.exists()) it.deleteRecursively() }
+    }
+
+    // =========================================================================
+    // Internal
+    // =========================================================================
+
+    private fun getScreenFile(dir: File, index: Int) = File(dir, "s$index.jpg")
+
+    private fun loadMeta(dir: File): RenderCacheMeta? {
+        val file = File(dir, "meta.json")
+        if (!file.exists()) return null
+        return try {
+            gson.fromJson(file.readText(), RenderCacheMeta::class.java)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun saveMeta(dir: File, meta: RenderCacheMeta) {
+        File(dir, "meta.json").writeText(gson.toJson(meta))
+    }
+
+    data class RenderCacheMeta(
+        val sourceFileSize: Long,
+        val sourceLastModified: Long,
+        val sourceFileSize2: Long = 0,      // デュアル初ページ用
+        val sourceLastModified2: Long = 0,   // デュアル初ページ用
+        val screenWidth: Int,
+        val screenHeight: Int,
+        val totalScreens: Int,
+        val firstPageOnly: Boolean,
+        val createdAt: Long
+    )
+}

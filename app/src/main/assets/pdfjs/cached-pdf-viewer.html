@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cached PDF Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%; height: 100%;
+            overflow: hidden; background: #000;
+        }
+        #container {
+            width: 100%; height: 100%;
+            display: flex; align-items: center; justify-content: center;
+            position: relative;
+        }
+        img {
+            position: absolute;
+            max-width: 100%; max-height: 100%;
+            object-fit: contain;
+        }
+        .hidden { visibility: hidden; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <img id="img-a" class="hidden">
+        <img id="img-b" class="hidden">
+    </div>
+    <script>
+        const imgA = document.getElementById('img-a');
+        const imgB = document.getElementById('img-b');
+        let frontImg = imgA;
+        let backImg = imgB;
+        let imagePaths = [];
+        let currentScreen = 0;
+        let totalScreens = 0;
+        let pageDuration = 10;
+        let pageTimer = null;
+        let dualPageMode = false;
+        let pageStep = 1;
+
+        function swapImages() {
+            backImg.classList.remove('hidden');
+            frontImg.classList.add('hidden');
+            const temp = frontImg;
+            frontImg = backImg;
+            backImg = temp;
+        }
+
+        /**
+         * firstPageOnlyモード: 1枚の画像を表示して完了。
+         * Android側から呼ばれる。
+         */
+        window.loadCachedFirstPage = function(imagePath) {
+            totalScreens = 1;
+            currentScreen = 0;
+            pageStep = 1;
+            dualPageMode = false;
+            backImg.onload = function() {
+                swapImages();
+                notifyPageChanged(1, 1);
+            };
+            backImg.onerror = function() {
+                // キャッシュ画像読み込み失敗
+                notifyPageChanged(1, 1);
+            };
+            backImg.src = imagePath;
+        };
+
+        /**
+         * allPagesモード: 複数の画像を順番に表示。
+         * pathsJson: JSONエンコードされたファイルパス配列
+         * duration: ページ表示秒数
+         * isDual: デュアルページモードかどうか（ステータスバー用）
+         * step: ページステップ（1=通常, 2=デュアル）
+         */
+        window.loadCachedAllPages = function(pathsJson, duration, isDual, step) {
+            imagePaths = JSON.parse(pathsJson);
+            totalScreens = imagePaths.length;
+            pageDuration = duration || 10;
+            dualPageMode = isDual || false;
+            pageStep = step || 1;
+            currentScreen = 0;
+            showScreen(0);
+        };
+
+        function showScreen(index) {
+            currentScreen = index;
+            backImg.onload = function() {
+                swapImages();
+                // ページ番号は元のPDFのページ番号に変換して通知
+                var pageNum = index * pageStep + 1;
+                var totalPages = totalScreens * pageStep;
+                // 最後のスクリーンが端数の場合を考慮（デュアルの奇数ページ等）
+                notifyPageChanged(pageNum, totalPages);
+
+                if (index + 1 < totalScreens) {
+                    pageTimer = setTimeout(function() {
+                        showScreen(index + 1);
+                    }, pageDuration * 1000);
+                } else {
+                    // 全スクリーン表示完了
+                    if (window.SignageInterface && window.SignageInterface.onAllPagesCompleted) {
+                        window.SignageInterface.onAllPagesCompleted();
+                    }
+                }
+            };
+            backImg.onerror = function() {
+                // 画像読み込みエラー → スキップ
+                notifyPageChanged(index * pageStep + 1, totalScreens * pageStep);
+                if (index + 1 < totalScreens) {
+                    pageTimer = setTimeout(function() {
+                        showScreen(index + 1);
+                    }, pageDuration * 1000);
+                } else {
+                    if (window.SignageInterface && window.SignageInterface.onAllPagesCompleted) {
+                        window.SignageInterface.onAllPagesCompleted();
+                    }
+                }
+            };
+            backImg.src = 'file://' + imagePaths[index];
+        }
+
+        function notifyPageChanged(current, total) {
+            if (window.SignageInterface && window.SignageInterface.onPageChanged) {
+                window.SignageInterface.onPageChanged(current, total);
+            }
+        }
+
+        window.stopPdf = function() {
+            if (pageTimer) { clearTimeout(pageTimer); pageTimer = null; }
+        };
+
+        window.getPageInfo = function() {
+            return JSON.stringify({
+                current: currentScreen * pageStep + 1,
+                total: totalScreens * pageStep,
+                dual: dualPageMode,
+                step: pageStep,
+                cached: true
+            });
+        };
+
+        // Signal ready to Android
+        if (window.SignageInterface && window.SignageInterface.onPdfViewerReady) {
+            window.SignageInterface.onPdfViewerReady();
+        }
+    </script>
+</body>
+</html>

@@ -42,6 +42,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var serverClient: ServerClient
     private lateinit var scheduleManager: ScheduleManager
     private lateinit var pdfCacheManager: PdfCacheManager
+    private lateinit var pdfRenderCacheManager: PdfRenderCacheManager
     private var smbPdfManager: SmbPdfManager? = null
 
     // pdf_folder サブプレイリスト管理
@@ -181,6 +182,7 @@ class PlayerActivity : ComponentActivity() {
         serverClient = ServerClient(config)
         scheduleManager = ScheduleManager(configManager, serverClient)
         pdfCacheManager = PdfCacheManager(this, serverClient)
+        pdfRenderCacheManager = PdfRenderCacheManager(this)
         smbPdfManager = SmbPdfManager(this)
 
         // Start playback
@@ -872,6 +874,7 @@ class PlayerActivity : ComponentActivity() {
         pdfCacheManager.downloadAll(schedule.playlist)
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
         pdfCacheManager.cleanupUnused(activeIds)
+        pdfRenderCacheManager.cleanupUnused(activeIds)
 
         if (!scheduleManager.isWithinPlayTime()) {
             addDebugLog("[PLAY] 再生時間外 (${schedule.playStartTime}-${schedule.playEndTime}) → standby")
@@ -1181,6 +1184,19 @@ class PlayerActivity : ComponentActivity() {
         webView.setInitialScale(100)
         val cachedFile = smbPdfManager?.getLocalPdfFile(item.contentId) ?: File("")
         val duration = item.pdfPageDuration ?: 10
+        val firstPageOnly = currentPdfFolderItem?.firstPageOnly == true
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+
+        // レンダリングキャッシュチェック
+        val cachedImages = pdfRenderCacheManager.getCachedImagePaths(item.contentId)
+        if (cachedImages != null && pdfRenderCacheManager.hasCachedRender(
+                item.contentId, cachedFile, screenW, screenH, firstPageOnly)) {
+            addDebugLog("[CACHE] サブPDF キャッシュヒット: ${item.name}")
+            loadCachedPdfViewerForSub(webView, cachedImages, duration, firstPageOnly)
+            return
+        }
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
@@ -1201,6 +1217,10 @@ class PlayerActivity : ComponentActivity() {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
                     val firstPageOnly = currentPdfFolderItem?.firstPageOnly == true
                     withContext(Dispatchers.Main) {
+                        // レンダリングキャッシュ: キャプチャ有効化
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${item.contentId}, true);", null
+                        )
                         webView.evaluateJavascript(
                             "loadPdfBase64('$base64', $duration, $firstPageOnly);", null
                         )
@@ -1220,6 +1240,20 @@ class PlayerActivity : ComponentActivity() {
     /** デュアルPDF先読み用: 2つのPDFの1ページ目を左右に並べてnextWebViewにロード */
     private fun loadDualPdfContentForPreload(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
         webView.setInitialScale(100)
+
+        // レンダリングキャッシュチェック（デュアル）
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId) ?: File("")
+        val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId) ?: File("")
+        val cachedImages = pdfRenderCacheManager.getCachedDualImagePaths(leftItem.contentId, rightItem.contentId)
+        if (cachedImages != null && pdfRenderCacheManager.hasCachedDualRender(
+                leftItem.contentId, rightItem.contentId, leftFile, rightFile, screenW, screenH)) {
+            addDebugLog("[CACHE] デュアルPDF キャッシュヒット: ${leftItem.name}")
+            loadCachedPdfViewerForSub(webView, cachedImages, 10, true)
+            return
+        }
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
@@ -1246,10 +1280,17 @@ class PlayerActivity : ComponentActivity() {
 
                 withContext(Dispatchers.Main) {
                     if (leftBase64 != null && rightBase64 != null) {
+                        // レンダリングキャッシュ: デュアル用キャプチャ有効化
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${leftItem.contentId}, true, ${rightItem.contentId});", null
+                        )
                         webView.evaluateJavascript(
                             "loadDualFirstPages('$leftBase64', '$rightBase64');", null
                         )
                     } else if (leftBase64 != null) {
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${leftItem.contentId}, true);", null
+                        )
                         webView.evaluateJavascript(
                             "loadPdfBase64('$leftBase64', 10, true);", null
                         )
@@ -1585,6 +1626,20 @@ class PlayerActivity : ComponentActivity() {
      */
     private fun loadDualPdfContent(webView: WebView, leftItem: PlaylistItem, rightItem: PlaylistItem) {
         webView.setInitialScale(100)
+
+        // レンダリングキャッシュチェック（デュアル直接表示）
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val leftFile = smbPdfManager?.getLocalPdfFile(leftItem.contentId) ?: File("")
+        val rightFile = smbPdfManager?.getLocalPdfFile(rightItem.contentId) ?: File("")
+        val cachedImages = pdfRenderCacheManager.getCachedDualImagePaths(leftItem.contentId, rightItem.contentId)
+        if (cachedImages != null && pdfRenderCacheManager.hasCachedDualRender(
+                leftItem.contentId, rightItem.contentId, leftFile, rightFile, screenW, screenH)) {
+            addDebugLog("[CACHE] デュアルPDF キャッシュヒット(直接): ${leftItem.name}")
+            loadCachedPdfViewerForSub(webView, cachedImages, 10, true)
+            return
+        }
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
@@ -1609,6 +1664,10 @@ class PlayerActivity : ComponentActivity() {
                     val leftBase64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
                     val rightBase64 = Base64.encodeToString(rightBytes, Base64.NO_WRAP)
                     withContext(Dispatchers.Main) {
+                        // レンダリングキャッシュ: デュアル用キャプチャ有効化
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${leftItem.contentId}, true, ${rightItem.contentId});", null
+                        )
                         webView.evaluateJavascript(
                             "loadDualFirstPages('$leftBase64', '$rightBase64');",
                             null
@@ -1618,6 +1677,9 @@ class PlayerActivity : ComponentActivity() {
                     // 右側がない場合はシングル表示にフォールバック
                     val base64 = Base64.encodeToString(leftBytes, Base64.NO_WRAP)
                     withContext(Dispatchers.Main) {
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${leftItem.contentId}, true);", null
+                        )
                         webView.evaluateJavascript(
                             "loadPdfBase64('$base64', 10, true);",
                             null
@@ -1645,6 +1707,21 @@ class PlayerActivity : ComponentActivity() {
                     pdfCacheManager.getCachedPdfPath(item.contentId)
                 }
                 val duration = item.pdfPageDuration ?: 10
+                val firstPageOnly = if (pdfFolderSubPlaylist != null) {
+                    currentPdfFolderItem?.firstPageOnly == true
+                } else false
+                val screenW = resources.displayMetrics.widthPixels
+                val screenH = resources.displayMetrics.heightPixels
+
+                // レンダリングキャッシュチェック
+                val cachedImages = pdfRenderCacheManager.getCachedImagePaths(item.contentId)
+                if (cachedImages != null && pdfRenderCacheManager.hasCachedRender(
+                        item.contentId, cachedFile, screenW, screenH, firstPageOnly)) {
+                    addDebugLog("[CACHE] キャッシュヒット: ${item.name} (${cachedImages.size}画面)")
+                    loadCachedPdfViewer(webView, cachedImages, duration, firstPageOnly, preloadType)
+                    return
+                }
+
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
@@ -1666,6 +1743,69 @@ class PlayerActivity : ComponentActivity() {
                 webView.loadUrl(url)
             }
         }
+    }
+
+    /**
+     * レンダリングキャッシュ済みPDFの高速表示。
+     * pdf-viewer.htmlの代わりにcached-pdf-viewer.htmlで画像を直接表示する。
+     */
+    private fun loadCachedPdfViewer(
+        webView: WebView,
+        imagePaths: List<File>,
+        duration: Int,
+        firstPageOnly: Boolean,
+        preloadType: String?
+    ) {
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("cached-pdf-viewer.html") == true) {
+                    if (firstPageOnly || imagePaths.size == 1) {
+                        webView.evaluateJavascript(
+                            "loadCachedFirstPage('file://${imagePaths[0].absolutePath}');", null
+                        )
+                    } else {
+                        val pathsJson = imagePaths.joinToString(",") { "\"${it.absolutePath}\"" }
+                        webView.evaluateJavascript(
+                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1);", null
+                        )
+                    }
+                    markPreloadReady(preloadType)
+                }
+            }
+        }
+        webView.loadUrl("file:///android_asset/pdfjs/cached-pdf-viewer.html")
+    }
+
+    /**
+     * サブプレイリスト用キャッシュ表示。subNextReadyをセットする。
+     */
+    private fun loadCachedPdfViewerForSub(
+        webView: WebView,
+        imagePaths: List<File>,
+        duration: Int,
+        firstPageOnly: Boolean
+    ) {
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("cached-pdf-viewer.html") == true) {
+                    if (firstPageOnly || imagePaths.size == 1) {
+                        webView.evaluateJavascript(
+                            "loadCachedFirstPage('file://${imagePaths[0].absolutePath}');", null
+                        )
+                    } else {
+                        val pathsJson = imagePaths.joinToString(",") { "\"${it.absolutePath}\"" }
+                        webView.evaluateJavascript(
+                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1);", null
+                        )
+                    }
+                    // サブPL先読みのready通知はonPageChangedコールバック経由
+                    // cached-pdf-viewerでもonPageChangedが呼ばれるため自動でsubNextReady=trueになる
+                }
+            }
+        }
+        webView.loadUrl("file:///android_asset/pdfjs/cached-pdf-viewer.html")
     }
 
     private fun markPreloadReady(preloadType: String?) {
@@ -1694,6 +1834,10 @@ class PlayerActivity : ComponentActivity() {
                         currentPdfFolderItem?.firstPageOnly == true
                     } else false
                     withContext(Dispatchers.Main) {
+                        // レンダリングキャッシュ: キャプチャ有効化（loadPdfBase64の前に呼ぶ）
+                        webView.evaluateJavascript(
+                            "setCaptureInfo(${item.contentId}, true);", null
+                        )
                         webView.evaluateJavascript(
                             "loadPdfBase64('$base64', $duration, $firstPageOnly);",
                             null
@@ -1907,6 +2051,61 @@ class PlayerActivity : ComponentActivity() {
         @JavascriptInterface
         fun onPdfViewerReady() {
             // PDF viewer is ready to receive data
+        }
+
+        /**
+         * PDF.jsレンダリング完了後にcanvasキャプチャを受信して保存。
+         * pdf-viewer.html の captureCurrentScreen() から呼ばれる。
+         */
+        @JavascriptInterface
+        fun onPageRendered(contentId: Int, screenIndex: Int, totalScreens: Int, dataUrl: String, contentId2: Int) {
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val base64Data = dataUrl.substringAfter("base64,")
+                    val jpegBytes = Base64.decode(base64Data, Base64.DEFAULT)
+
+                    // ソースPDFファイルを特定
+                    val sourceFile = if (pdfFolderSubPlaylist != null) {
+                        smbPdfManager?.getLocalPdfFile(contentId) ?: File("")
+                    } else {
+                        pdfCacheManager.getCachedPdfPath(contentId)
+                    }
+
+                    val firstPageOnly = if (pdfFolderSubPlaylist != null) {
+                        currentPdfFolderItem?.firstPageOnly == true
+                    } else false
+
+                    val screenW = resources.displayMetrics.widthPixels
+                    val screenH = resources.displayMetrics.heightPixels
+
+                    // デュアル初ページの場合はcompositeキー
+                    val cacheKey = if (contentId2 != 0) {
+                        val sourceFile2 = smbPdfManager?.getLocalPdfFile(contentId2) ?: File("")
+                        pdfRenderCacheManager.saveRenderedScreen(
+                            "dual_${contentId}_${contentId2}",
+                            screenIndex, totalScreens, jpegBytes,
+                            sourceFile, screenW, screenH, true,
+                            sourceFile2 = sourceFile2
+                        )
+                        return@launch
+                    } else {
+                        contentId.toString()
+                    }
+
+                    pdfRenderCacheManager.saveRenderedScreen(
+                        cacheKey, screenIndex, totalScreens, jpegBytes,
+                        sourceFile, screenW, screenH, firstPageOnly
+                    )
+
+                    withContext(Dispatchers.Main) {
+                        if (screenIndex == totalScreens - 1) {
+                            addDebugLog("[CACHE] レンダリングキャッシュ保存完了: id=$contentId (${totalScreens}画面)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
 
         @JavascriptInterface

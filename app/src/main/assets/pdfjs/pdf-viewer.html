@@ -59,6 +59,57 @@
         let dualPageMode = false;  // A4縦検出時にtrue
         let pageStep = 1;         // 1=通常, 2=デュアルページ
 
+        // レンダリングキャッシュ用
+        let captureContentId = null;
+        let captureEnabled = false;
+        let captureScreenIndex = 0;
+        // デュアル初ページ用（2つの異なるPDF）
+        let captureContentId2 = null;
+
+        /**
+         * Android側からキャプチャ情報をセット（loadPdfBase64/loadDualFirstPagesの前に呼ぶ）
+         * @param contentId PDFのcontentId
+         * @param enable キャプチャを有効にするか
+         * @param contentId2 デュアル初ページ用の2つ目のcontentId（省略可）
+         */
+        window.setCaptureInfo = function(contentId, enable, contentId2) {
+            captureContentId = contentId;
+            captureEnabled = !!enable;
+            captureScreenIndex = 0;
+            captureContentId2 = contentId2 || null;
+        };
+
+        /**
+         * 現在表示中のfrontCanvasをJPEGキャプチャしてAndroidに送信。
+         * swapCanvases()後にrequestAnimationFrameで呼び出す。
+         */
+        function captureCurrentScreen() {
+            if (!captureEnabled || captureContentId == null) return;
+            requestAnimationFrame(function() {
+                try {
+                    var totalScreens;
+                    if (firstPageOnlyMode) {
+                        totalScreens = 1;
+                    } else {
+                        totalScreens = Math.ceil(totalPages / pageStep);
+                    }
+                    var dataUrl = frontCanvas.toDataURL('image/jpeg', 0.85);
+                    if (window.SignageInterface && window.SignageInterface.onPageRendered) {
+                        window.SignageInterface.onPageRendered(
+                            captureContentId,
+                            captureScreenIndex,
+                            totalScreens,
+                            dataUrl,
+                            captureContentId2 || 0
+                        );
+                    }
+                    captureScreenIndex++;
+                } catch (e) {
+                    console.error('Capture error:', e);
+                }
+            });
+        }
+
         async function loadPdfFromData(data, firstPageOnly) {
             try {
                 firstPageOnlyMode = !!firstPageOnly;
@@ -131,6 +182,7 @@
 
             swapCanvases();
             notifyPageChanged();
+            captureCurrentScreen();
         }
 
         async function renderDualPage(startPageNum) {
@@ -205,6 +257,7 @@
 
             swapCanvases();
             notifyPageChanged();
+            captureCurrentScreen();
         }
 
         function swapCanvases() {
@@ -369,6 +422,7 @@
                     ctx.drawImage(rightOff, rightX, rightY);
 
                     swapCanvases();
+                    captureCurrentScreen();
 
                     // Clean up
                     leftDoc.destroy();
