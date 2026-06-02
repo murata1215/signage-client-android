@@ -513,9 +513,16 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        // When paused (interactive mode), only intercept BACK to resume
+        // When paused (interactive mode), center button (or BACK) resumes
         if (isPaused) {
             return when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    resumePlayback()
+                    true
+                }
+                // 戻るも再開として維持（キオスクで finish() に流れて終了させない）
                 KeyEvent.KEYCODE_BACK -> {
                     resumePlayback()
                     true
@@ -668,7 +675,7 @@ class PlayerActivity : ComponentActivity() {
 
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
-        statusBar.text = formatStatusText(screen?.displayTitle ?: "", "⏸ 一時停止中 (戻るで再開)")
+        statusBar.text = formatStatusText(screen?.displayTitle ?: "", "⏸ 一時停止中 (中央ボタンで再開)")
 
         enableWebViewInteraction()
     }
@@ -922,7 +929,7 @@ class PlayerActivity : ComponentActivity() {
             )
             background = GradientDrawable().apply {
                 setColor(Color.TRANSPARENT)
-                setStroke(8, Color.GRAY)
+                setStroke(24, Color.GRAY)
             }
             visibility = View.GONE
             isClickable = false
