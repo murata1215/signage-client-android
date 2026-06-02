@@ -27,7 +27,9 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -71,6 +73,12 @@ class PlayerActivity : ComponentActivity() {
     private var thumbnailToken = 0  // 高速移動時のサムネイル取り違え防止
     private var screenListTimeout: Runnable? = null
     private val SCREEN_LIST_TIMEOUT_MS = 60_000L  // 無操作で選択確定するまでの時間
+
+    // Webサムネイルキャッシュ
+    private val WEB_THUMB_TTL_MS = 6 * 60 * 60 * 1000L  // 再キャプチャ間隔(6時間)
+    private val WEB_CAPTURE_DELAY_MS = 1500L            // 表示後キャプチャまでの待ち
+    private val WEB_THUMB_SCALE = 0.5f                  // サムネイル縮小率
+    private var webCaptureRunnable: Runnable? = null
 
     private val debugLines = mutableListOf<String>()
     private var debugPage = 0  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
@@ -132,8 +140,10 @@ class PlayerActivity : ComponentActivity() {
                     val items = scheduleManager.playlist
                     pdfCacheManager.downloadAll(items)
                     val activeIds = items.filter { it.type == "pdf" }.map { it.contentId }.toSet()
+                    val activeWebKeys = items.filter { it.type == "web" }
+                        .mapNotNull { it.url?.let(pdfRenderCacheManager::webCacheKey) }.toSet()
                     pdfCacheManager.cleanupUnused(activeIds)
-                    pdfRenderCacheManager.cleanupUnused(activeIds)
+                    pdfRenderCacheManager.cleanupUnused(activeIds, activeWebKeys)
                     // フラットリスト再構築
                     val newScreens = withContext(Dispatchers.IO) { buildFlatScreens(items) }
                     withContext(Dispatchers.Main) {
@@ -829,7 +839,8 @@ class PlayerActivity : ComponentActivity() {
             "pdf" -> pdfRenderCacheManager.getCachedImagePaths(screen.contentId)?.firstOrNull()
             "dual_pdf" -> pdfRenderCacheManager
                 .getCachedDualImagePaths(screen.contentId, screen.rightContentId)?.firstOrNull()
-            else -> null  // web: 将来的にキャッシュ対応予定
+            "web" -> screen.url?.let { pdfRenderCacheManager.getWebThumbnail(it) }
+            else -> null
         }?.takeIf { it.exists() }
     }
 
@@ -1095,8 +1106,10 @@ class PlayerActivity : ComponentActivity() {
 
         pdfCacheManager.downloadAll(schedule.playlist)
         val activeIds = schedule.playlist.filter { it.type == "pdf" }.map { it.contentId }.toSet()
+        val activeWebKeys = schedule.playlist.filter { it.type == "web" }
+            .mapNotNull { it.url?.let(pdfRenderCacheManager::webCacheKey) }.toSet()
         pdfCacheManager.cleanupUnused(activeIds)
-        pdfRenderCacheManager.cleanupUnused(activeIds)
+        pdfRenderCacheManager.cleanupUnused(activeIds, activeWebKeys)
 
         // フラットスクリーンリスト構築
         withContext(Dispatchers.Main) { statusBar.text = "フォルダ同期中..." }
@@ -1452,6 +1465,69 @@ class PlayerActivity : ComponentActivity() {
         pdfPageDurationSec = screen.pdfPageDuration ?: 10
         remainingSeconds = screen.durationSeconds
         startCountdown()
+        maybeScheduleWebCapture(screen)
+    }
+
+    // =========================================================================
+    // Web thumbnail capture
+    // =========================================================================
+
+    /**
+     * webコンテンツ表示中、TTL切れのサムネイルを再キャプチャ予約する。
+     * 表示直後はレンダリング未完了のため WEB_CAPTURE_DELAY_MS 待ってから
+     * アクティブWebViewをソフトウェア描画してJPEG保存する。
+     */
+    private fun maybeScheduleWebCapture(screen: FlatScreen) {
+        webCaptureRunnable?.let { handler.removeCallbacks(it) }
+        webCaptureRunnable = null
+
+        val url = screen.url
+        if (screen.type != "web" || url.isNullOrEmpty()) return
+        if (isScreenListMode) return
+        if (pdfRenderCacheManager.hasFreshWebThumbnail(url, WEB_THUMB_TTL_MS)) return
+
+        val targetIndex = currentScreenIndex
+        val targetWebView = activeWebView ?: return
+        val title = screen.displayTitle
+
+        val runnable = Runnable {
+            // 発火時に状態が変わっていないか再確認
+            if (isScreenListMode) return@Runnable
+            if (currentScreenIndex != targetIndex) return@Runnable
+            if (activeWebView !== targetWebView) return@Runnable
+            captureWebThumbnail(targetWebView, url, title)
+        }
+        webCaptureRunnable = runnable
+        handler.postDelayed(runnable, WEB_CAPTURE_DELAY_MS)
+    }
+
+    /** アクティブWebViewを縮小ソフトウェア描画してJPEG保存 */
+    private fun captureWebThumbnail(webView: WebView, url: String, title: String) {
+        try {
+            val w = webView.width
+            val h = webView.height
+            if (w <= 0 || h <= 0) return
+            val tw = (w * WEB_THUMB_SCALE).toInt().coerceAtLeast(1)
+            val th = (h * WEB_THUMB_SCALE).toInt().coerceAtLeast(1)
+            val bitmap = Bitmap.createBitmap(tw, th, Bitmap.Config.RGB_565)
+            val canvas = Canvas(bitmap)
+            canvas.scale(WEB_THUMB_SCALE, WEB_THUMB_SCALE)
+            webView.draw(canvas)
+
+            coroutineScope.launch(Dispatchers.IO) {
+                try {
+                    val baos = java.io.ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, baos)
+                    pdfRenderCacheManager.saveWebThumbnail(url, baos.toByteArray(), title, tw, th)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    bitmap.recycle()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     // =========================================================================

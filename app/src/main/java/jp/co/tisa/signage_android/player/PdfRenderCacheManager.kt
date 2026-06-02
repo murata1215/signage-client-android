@@ -33,6 +33,14 @@ class PdfRenderCacheManager(context: Context) {
     fun getDualCacheDir(leftContentId: Int, rightContentId: Int): File =
         File(cacheDir, "dual_${leftContentId}_${rightContentId}")
 
+    /** WebコンテンツのキャッシュキーをURLから生成（contentId=0のため URL ハッシュを使用） */
+    fun webCacheKey(url: String): String {
+        val h = url.hashCode()
+        return if (h < 0) "web_n${-h.toLong()}" else "web_$h"
+    }
+
+    private fun getWebCacheDir(url: String): File = File(cacheDir, webCacheKey(url))
+
     // =========================================================================
     // Validation
     // =========================================================================
@@ -119,6 +127,45 @@ class PdfRenderCacheManager(context: Context) {
     }
 
     // =========================================================================
+    // Web thumbnail
+    // =========================================================================
+
+    /** 指定URLのwebサムネイルがTTL内かつ存在するか */
+    fun hasFreshWebThumbnail(url: String, ttlMillis: Long): Boolean {
+        val dir = getWebCacheDir(url)
+        val meta = loadMeta(dir) ?: return false
+        if (!getScreenFile(dir, 0).exists()) return false
+        return System.currentTimeMillis() - meta.createdAt < ttlMillis
+    }
+
+    /** webサムネイル画像ファイルを返す（存在時のみ） */
+    fun getWebThumbnail(url: String): File? {
+        return getScreenFile(getWebCacheDir(url), 0).takeIf { it.exists() }
+    }
+
+    /** webサムネイルJPEGを1枚保存（source検証は使わずTTLのみで管理） */
+    fun saveWebThumbnail(url: String, jpegBytes: ByteArray, title: String, screenWidth: Int, screenHeight: Int) {
+        try {
+            val dir = getWebCacheDir(url)
+            if (!dir.exists()) dir.mkdirs()
+            getScreenFile(dir, 0).writeBytes(jpegBytes)
+            val meta = RenderCacheMeta(
+                sourceFileSize = 0,
+                sourceLastModified = 0,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                totalScreens = 1,
+                firstPageOnly = true,
+                title = title,
+                createdAt = System.currentTimeMillis()
+            )
+            saveMeta(dir, meta)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // =========================================================================
     // Write
     // =========================================================================
 
@@ -171,12 +218,17 @@ class PdfRenderCacheManager(context: Context) {
     // Cleanup
     // =========================================================================
 
-    /** アクティブでないcontentIdのキャッシュを削除 */
-    fun cleanupUnused(activeContentIds: Set<Int>) {
+    /** アクティブでないcontentId・webキャッシュを削除 */
+    fun cleanupUnused(activeContentIds: Set<Int>, activeWebKeys: Set<String> = emptySet()) {
         cacheDir.listFiles()?.forEach { dir ->
             if (!dir.isDirectory) return@forEach
-            // "dual_xxx_yyy" ディレクトリは個別判定
-            if (dir.name.startsWith("dual_")) {
+            // "web_xxx" ディレクトリはアクティブキー判定
+            if (dir.name.startsWith("web_")) {
+                if (dir.name !in activeWebKeys) {
+                    dir.deleteRecursively()
+                }
+            } else if (dir.name.startsWith("dual_")) {
+                // "dual_xxx_yyy" ディレクトリは個別判定
                 val parts = dir.name.removePrefix("dual_").split("_")
                 val ids = parts.mapNotNull { it.toIntOrNull() }
                 if (ids.none { it in activeContentIds }) {
