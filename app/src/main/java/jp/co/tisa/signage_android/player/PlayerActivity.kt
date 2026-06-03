@@ -100,6 +100,8 @@ class PlayerActivity : ComponentActivity() {
     private var isAllPagesMode: Boolean = false
     private var pdfPageDurationSec: Int = 10
     private var pollingJob: Job? = null
+    private var smbSyncJob: Job? = null
+    private val SMB_SYNC_INTERVAL_MS = 5 * 60 * 1000L  // SMBフォルダ再同期間隔(5分)
     private var isPlaying = false
     private var isPaused = false
     private var nextReady = false
@@ -1145,6 +1147,7 @@ class PlayerActivity : ComponentActivity() {
 
         addDebugLog("[PLAY] 再生開始")
         displayCurrentScreen()
+        startSmbFolderSync()
     }
 
     /**
@@ -1221,6 +1224,65 @@ class PlayerActivity : ComponentActivity() {
             i++
         }
     }
+
+    // =========================================================================
+    // SMB folder periodic re-sync
+    // =========================================================================
+
+    /**
+     * 一定間隔でSMB共有フォルダを再同期し、新規/削除されたPDFや
+     * 命名規約の日付フィルタ変化をフラットリストへ反映する。
+     * 再生中の画面は維持し、next/prevのみ先読みし直すのでちらつかない。
+     */
+    private fun startSmbFolderSync() {
+        smbSyncJob?.cancel()
+        val manager = smbPdfManager ?: return
+        smbSyncJob = coroutineScope.launch {
+            while (isActive) {
+                delay(SMB_SYNC_INTERVAL_MS)
+                if (!isPlaying || isPaused || isScreenListMode) continue
+                val items = scheduleManager.playlist
+                val folders = items.filter { it.type == "pdf_folder" }
+                if (folders.isEmpty()) continue
+                try {
+                    val newScreens = withContext(Dispatchers.IO) {
+                        for (f in folders) {
+                            try { manager.syncFolder(f) { } } catch (_: Exception) {}
+                        }
+                        buildFlatScreens(items)
+                    }
+                    applyRefreshedScreens(newScreens)
+                } catch (e: Exception) {
+                    addDebugLog("[SMB] 定期同期エラー: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /** 再同期結果を再生中断なしで反映する（Mainスレッド） */
+    private fun applyRefreshedScreens(newScreens: List<FlatScreen>) {
+        if (newScreens.isEmpty()) return
+        if (!isPlaying || isPaused || isScreenListMode) return
+        if (sameScreens(flatScreens, newScreens)) return  // 変更なし: 先読み無駄打ち防止
+
+        val current = flatScreens.getOrNull(currentScreenIndex)
+        flatScreens = newScreens
+        // 現在表示中の画面を新リスト内で同定して位置を維持
+        val newIdx = if (current != null) newScreens.indexOfFirst { sameScreen(it, current) } else -1
+        currentScreenIndex = if (newIdx >= 0) newIdx
+            else currentScreenIndex.coerceIn(0, newScreens.size - 1)
+
+        addDebugLog("[SMB] フォルダ更新反映: ${newScreens.size}画面 (index=${currentScreenIndex + 1})")
+        if (debugPage == 2) updateDebugContent()
+
+        // activeはそのまま、隣接のみ新リストで先読みし直す
+        preloadBothDirections()
+    }
+
+    private fun screenKey(s: FlatScreen): String = "${s.type}:${s.contentId}:${s.rightContentId}"
+    private fun sameScreen(a: FlatScreen, b: FlatScreen): Boolean = screenKey(a) == screenKey(b)
+    private fun sameScreens(a: List<FlatScreen>, b: List<FlatScreen>): Boolean =
+        a.size == b.size && a.indices.all { screenKey(a[it]) == screenKey(b[it]) }
 
     /** 現在のスクリーンを表示する */
     private fun displayCurrentScreen() {
@@ -1735,6 +1797,7 @@ class PlayerActivity : ComponentActivity() {
         longPressResetRunnable?.let { handler.removeCallbacks(it) }
         screenListTimeout?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
+        smbSyncJob?.cancel()
         coroutineScope.cancel()
         webViewA.destroy()
         webViewB.destroy()
