@@ -101,7 +101,8 @@ class PlayerActivity : ComponentActivity() {
     private var pdfPageDurationSec: Int = 10
     private var pollingJob: Job? = null
     private var smbSyncJob: Job? = null
-    private val SMB_SYNC_INTERVAL_MS = 5 * 60 * 1000L  // SMBフォルダ再同期間隔(5分)
+    private val SMB_SYNC_INTERVAL_MS = 3 * 60 * 1000L  // SMBフォルダ再同期間隔(3分)
+    private val SMB_SYNC_INITIAL_DELAY_MS = 5_000L     // 起動後 初回同期までの待ち(5秒)
     private var isPlaying = false
     private var isPaused = false
     private var nextReady = false
@@ -1238,23 +1239,26 @@ class PlayerActivity : ComponentActivity() {
         smbSyncJob?.cancel()
         val manager = smbPdfManager ?: return
         smbSyncJob = coroutineScope.launch {
+            delay(SMB_SYNC_INITIAL_DELAY_MS)  // 起動直後の初回同期(表示の落ち着き待ち程度)
             while (isActive) {
-                delay(SMB_SYNC_INTERVAL_MS)
-                if (!isPlaying || isPaused || isScreenListMode) continue
-                val items = scheduleManager.playlist
-                val folders = items.filter { it.type == "pdf_folder" }
-                if (folders.isEmpty()) continue
-                try {
-                    val newScreens = withContext(Dispatchers.IO) {
-                        for (f in folders) {
-                            try { manager.syncFolder(f) { } } catch (_: Exception) {}
+                if (isPlaying && !isPaused && !isScreenListMode) {
+                    val items = scheduleManager.playlist
+                    val folders = items.filter { it.type == "pdf_folder" }
+                    if (folders.isNotEmpty()) {
+                        try {
+                            val newScreens = withContext(Dispatchers.IO) {
+                                for (f in folders) {
+                                    try { manager.syncFolder(f) { } } catch (_: Exception) {}
+                                }
+                                buildFlatScreens(items)
+                            }
+                            applyRefreshedScreens(newScreens)
+                        } catch (e: Exception) {
+                            addDebugLog("[SMB] 定期同期エラー: ${e.message}")
                         }
-                        buildFlatScreens(items)
                     }
-                    applyRefreshedScreens(newScreens)
-                } catch (e: Exception) {
-                    addDebugLog("[SMB] 定期同期エラー: ${e.message}")
                 }
+                delay(SMB_SYNC_INTERVAL_MS)
             }
         }
     }
