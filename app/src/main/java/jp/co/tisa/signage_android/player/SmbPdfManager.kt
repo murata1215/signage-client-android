@@ -40,8 +40,12 @@ class SmbPdfManager(private val context: Context) {
         val lastModified: Long,
         val fileSize: Long,
         val pageCount: Int,
-        val isPortrait: Boolean = false  // 縦長PDF判定
+        val isPortrait: Boolean = false,  // 縦長PDF判定
+        val urls: List<String>? = null    // .txtファイルの中身URL群(webコンテンツ用)
     )
+
+    private fun isTxtEntry(filename: String): Boolean =
+        filename.lowercase().endsWith(".txt")
 
     private data class ParsedUncPath(
         val host: String,
@@ -169,17 +173,30 @@ class SmbPdfManager(private val context: Context) {
 
                     downloadFile(share, parsed.path, rf.filename, localFile)
 
-                    val pdfInfo = analyzePdf(localFile)
-
-                    newEntries.add(
-                        SmbCacheEntry(
-                            filename = rf.filename,
-                            lastModified = rf.lastModified,
-                            fileSize = rf.fileSize,
-                            pageCount = pdfInfo.pageCount,
-                            isPortrait = pdfInfo.isPortrait
+                    if (isTxtEntry(rf.filename)) {
+                        val urls = parseUrlsFromTxt(localFile)
+                        newEntries.add(
+                            SmbCacheEntry(
+                                filename = rf.filename,
+                                lastModified = rf.lastModified,
+                                fileSize = rf.fileSize,
+                                pageCount = 1,
+                                isPortrait = false,
+                                urls = urls
+                            )
                         )
-                    )
+                    } else {
+                        val pdfInfo = analyzePdf(localFile)
+                        newEntries.add(
+                            SmbCacheEntry(
+                                filename = rf.filename,
+                                lastModified = rf.lastModified,
+                                fileSize = rf.fileSize,
+                                pageCount = pdfInfo.pageCount,
+                                isPortrait = pdfInfo.isPortrait
+                            )
+                        )
+                    }
                 } else {
                     newEntries.add(existing!!)
                 }
@@ -273,7 +290,8 @@ class SmbPdfManager(private val context: Context) {
             val attrs = entry.fileAttributes
             if (attrs != 0L && (attrs and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L) continue
 
-            if (!name.lowercase().endsWith(".pdf")) continue
+            val lower = name.lowercase()
+            if (!lower.endsWith(".pdf") && !lower.endsWith(".txt")) continue
 
             result.add(
                 SmbRemoteFile(
@@ -332,6 +350,21 @@ class SmbPdfManager(private val context: Context) {
         }
     }
 
+    /**
+     * .txtファイルからURL行を抽出する。
+     * http:// または https:// で始まる行をURLとして順に取得（空行・コメントは無視）。
+     */
+    private fun parseUrlsFromTxt(file: File): List<String> {
+        return try {
+            file.readLines()
+                .map { it.trim() }
+                .filter { it.startsWith("http://", true) || it.startsWith("https://", true) }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+
     // =====================================================================
     // Metadata persistence
     // =====================================================================
@@ -366,15 +399,17 @@ class SmbPdfManager(private val context: Context) {
      */
     private data class FileNameConfig(
         val sortOrder: Int,          // 並び順（小さい順に表示）
-        val firstPageOnly: Boolean,  // true=先頭ページのみ(0), false=全ページ(1)
+        val firstPageOnly: Boolean,  // true=先頭ページのみ(0), false=全ページ(1)。webでは無視
         val startDate: LocalDate,    // 表示開始日
         val endDate: LocalDate,      // 表示終了日
-        val durationSeconds: Int,    // 表示秒数（全ページ時は1ページあたり秒数）
+        val durationSeconds: Int?,   // 表示秒数（省略時はnull→親フォルダ既定を使用）
         val description: String      // 説明テキスト
     )
 
+    // {順番}_{ページ制御}_{開始日}_{終了日}[_{秒}]_{説明}.(pdf|txt)
+    // 秒フィールドは任意（省略時は親フォルダ既定秒）。.txtはURL(web)表示用。
     private val fileNamePattern = Regex(
-        """^(\d+)_([01])_(\d{8})_(\d{8})_(\d+)_(.+)\.[pP][dD][fF]$"""
+        """^(\d+)_([01])_(\d{8})_(\d{8})(?:_(\d+))?_(.+)\.([pP][dD][fF]|[tT][xX][tT])$"""
     )
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
 
@@ -390,7 +425,7 @@ class SmbPdfManager(private val context: Context) {
                 firstPageOnly = match.groupValues[2] == "0",
                 startDate = LocalDate.parse(match.groupValues[3], dateFormatter),
                 endDate = LocalDate.parse(match.groupValues[4], dateFormatter),
-                durationSeconds = match.groupValues[5].toInt(),
+                durationSeconds = match.groupValues[5].takeIf { it.isNotEmpty() }?.toInt(),
                 description = match.groupValues[6]
             )
         } catch (e: Exception) {
@@ -441,20 +476,30 @@ class SmbPdfManager(private val context: Context) {
         for (parsed_entry in sortedConfigured) {
             val entry = parsed_entry.entry
             val config = parsed_entry.config
+
+            // .txt(URLファイル): 中身のURLごとにweb画面を生成（秒数ごとにローテーション）
+            if (isTxtEntry(entry.filename)) {
+                val sec = config.durationSeconds ?: durationSeconds
+                displayIndex = addWebItems(items, parentItem, parsed, entry, sec, displayIndex)
+                continue
+            }
+
             val contentId = generateContentId(parsed, entry.filename)
             val localFile = File(cacheDir, entry.filename)
             if (!localFile.exists()) continue
 
             localFileMap[contentId] = localFile
 
+            // 秒省略時は親フォルダ既定を使用
+            val sec = config.durationSeconds ?: durationSeconds
             // ページ制御=1(全ページ)の場合: durationSecondsをpdfPageDurationとして扱う
             val itemFirstPageOnly = config.firstPageOnly
-            val itemPdfPageDuration = if (!itemFirstPageOnly) config.durationSeconds else null
+            val itemPdfPageDuration = if (!itemFirstPageOnly) sec else null
             val itemDuration = if (!itemFirstPageOnly) {
                 // allPagesモード: 安全弁用に大きめ設定
-                (entry.pageCount + 1) * config.durationSeconds
+                (entry.pageCount + 1) * sec
             } else {
-                config.durationSeconds
+                sec
             }
 
             items.add(
@@ -482,6 +527,12 @@ class SmbPdfManager(private val context: Context) {
 
         // 規約外ファイル: 親アイテムのデフォルト設定を使用（従来動作）
         for (entry in sortedDefault) {
+            // .txt(URLファイル): 親フォルダ既定秒でweb画面を生成
+            if (isTxtEntry(entry.filename)) {
+                displayIndex = addWebItems(items, parentItem, parsed, entry, durationSeconds, displayIndex)
+                continue
+            }
+
             val contentId = generateContentId(parsed, entry.filename)
             val localFile = File(cacheDir, entry.filename)
             if (!localFile.exists()) continue
@@ -519,6 +570,49 @@ class SmbPdfManager(private val context: Context) {
         }
 
         return items
+    }
+
+    /**
+     * .txtエントリの各URLを type="web" のPlaylistItemとして追加する。
+     * 1ファイルに複数URLがあれば、durationSeconds秒ごとに1URLずつローテーション表示される。
+     * @return 次のdisplayIndex
+     */
+    private fun addWebItems(
+        items: MutableList<PlaylistItem>,
+        parentItem: PlaylistItem,
+        parsed: ParsedUncPath,
+        entry: SmbCacheEntry,
+        durationSeconds: Int,
+        startDisplayIndex: Int
+    ): Int {
+        var displayIndex = startDisplayIndex
+        val urls = entry.urls ?: emptyList()
+        urls.forEachIndexed { uidx, url ->
+            // URLインデックスでcontentIdを一意化（同一ファイル内の複数URLを区別）
+            val contentId = generateContentId(parsed, "${entry.filename}#$uidx")
+            items.add(
+                PlaylistItem(
+                    id = contentId,
+                    scope = "smb_${parentItem.id}",
+                    contentId = contentId,
+                    name = entry.filename,
+                    type = "web",
+                    url = url,
+                    fileUrl = null,
+                    pdfPageDuration = null,
+                    durationSeconds = durationSeconds,
+                    displayOrder = displayIndex++,
+                    useProxy = false,
+                    proxyUrl = null,
+                    smbPath = null,
+                    smbUsername = null,
+                    smbPassword = null,
+                    firstPageOnly = null,
+                    isPortrait = false
+                )
+            )
+        }
+        return displayIndex
     }
 
     private fun generateContentId(parsed: ParsedUncPath, filename: String): Int {

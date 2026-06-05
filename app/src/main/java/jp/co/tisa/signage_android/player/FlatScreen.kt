@@ -55,7 +55,7 @@ data class FlatScreen(
          * 命名規約 {順番}_{ページ}_{開始日}_{終了日}_{秒}_{説明} から説明部分を取り出し、
          * 拡張子を除去した表示用タイトルを返す。規約外は拡張子のみ除去。
          */
-        private val titlePattern = Regex("""^\d+_[01]_\d{8}_\d{8}_\d+_(.+)$""")
+        private val titlePattern = Regex("""^\d+_[01]_\d{8}_\d{8}(?:_\d+)?_(.+)$""")
 
         fun formatTitle(rawName: String): String {
             val noExt = rawName.substringBeforeLast('.', rawName)

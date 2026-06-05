@@ -1202,6 +1202,14 @@ class PlayerActivity : ComponentActivity() {
         var i = 0
         while (i < subItems.size) {
             val subItem = subItems[i]
+
+            // .txt由来のweb画面（URL表示）はそのまま追加（デュアルペアリング対象外）
+            if (subItem.type == "web") {
+                screens.add(FlatScreen.fromWeb(subItem, mainIdx))
+                i++
+                continue
+            }
+
             val sourceFile = smbPdfManager?.getLocalPdfFile(subItem.contentId)
             if (sourceFile == null) {
                 i++
@@ -1283,7 +1291,8 @@ class PlayerActivity : ComponentActivity() {
         preloadBothDirections()
     }
 
-    private fun screenKey(s: FlatScreen): String = "${s.type}:${s.contentId}:${s.rightContentId}"
+    private fun screenKey(s: FlatScreen): String =
+        if (s.type == "web") "web:${s.url}" else "${s.type}:${s.contentId}:${s.rightContentId}"
     private fun sameScreen(a: FlatScreen, b: FlatScreen): Boolean = screenKey(a) == screenKey(b)
     private fun sameScreens(a: List<FlatScreen>, b: List<FlatScreen>): Boolean =
         a.size == b.size && a.indices.all { screenKey(a[it]) == screenKey(b[it]) }
