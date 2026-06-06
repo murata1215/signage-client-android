@@ -35,6 +35,16 @@ data class PlaylistItem(
     @Transient val isPortrait: Boolean = false  // ローカル専用: 縦長PDF判定(APIには含まれない)
 )
 
+data class UnassignedClient(
+    @SerializedName("id") val id: Int,
+    @SerializedName("name") val name: String,
+    @SerializedName("client_key") val clientKey: String
+)
+
+data class UnassignedClientsResponse(
+    @SerializedName("clients") val clients: List<UnassignedClient>
+)
+
 data class UpdateInfo(
     @SerializedName("version_code") val versionCode: Int,
     @SerializedName("version_name") val versionName: String,

@@ -125,6 +125,26 @@ class ServerClient(private val config: SignageConfig) {
         }
     }
 
+    // 未割当クライアント一覧取得 (key認証不要、初期設定画面用)
+    suspend fun fetchUnassignedClients(): List<UnassignedClient>? = withContext(Dispatchers.IO) {
+        try {
+            val url = "${config.serverUrl}/api/player/unassigned-clients"
+            val request = Request.Builder().url(url).get().build()
+            val response = getClient(url).newCall(request).execute()
+            response.use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: return@withContext null
+                    gson.fromJson(body, UnassignedClientsResponse::class.java)?.clients
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
     suspend fun checkForUpdate(): UpdateInfo? = withContext(Dispatchers.IO) {
         try {
             val url = buildPlayerUrl("/api/player/update/check")
