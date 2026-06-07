@@ -19,13 +19,15 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **フラットスクリーンリスト**: スケジュール取得時にpdf_folderを展開し全コンテンツを1次元リストに格納。ナビゲーションはcurrentScreenIndexの増減のみ
 - **先読み**: next/prev両方向を事前ロード、完了後にフェード切替(ちらつき防止)
 - **SMB PDFフォルダ**: type=pdf_folder でWindows共有フォルダからPDFを自動取得・ローテーション表示
+- **SMB URLテキスト**: SMBフォルダ内の.txtファイル(URL記載)をtype=webのPlaylistItemに展開してWeb画面表示。複数URLは1URLずつローテーション(1URL=1 FlatScreen)
 - **再生時間外自動停止**: コンテンツ切替時にisWithinPlayTime()チェック、時間外ならstandby表示+60秒間隔で復帰チェック
 - **スケジュール更新一元化**: SignageServiceが60秒間隔でAPK+スケジュール更新チェック、変更時はBroadcastでPlayerActivityに通知
 - **自動アップデート**: ACTION_VIEW Intent方式でOTA更新 (1分間隔チェック、白い画面で確認→完了後「開く」ボタン)
 - **プロキシ**: OkHttp で社内プロキシ(210.175.128.100:8080)経由、ローカルIPはバイパス
 - **キオスク**: 画面常時ON、フルスクリーン、Boot時自動起動
 - **操作**: リモコン(DPAD) + タッチジェスチャー(スワイプ/ダブルタップ)対応
-- **SMB PDFフォルダ命名規約**: ファイル名で表示制御 ({順番}_{ページ制御}_{開始日}_{終了日}_{秒}_{説明}.pdf)、規約外ファイルはデフォルト動作
+- **SMB PDFフォルダ命名規約**: ファイル名で表示制御 ({順番}_{ページ制御}_{開始日}_{終了日}[_{秒}]_{説明}.pdf|.txt)、秒は省略可(省略時は親のデフォルト秒数)、規約外ファイルはデフォルト動作
+- **初期設定簡略化**: サーバーURLデフォルトプリセット(https://service.internal.atg.co.jp/tsinternal/signage-server-windows) + 未割当クライアント一覧(GET /api/player/unassigned-clients、key不要)から選択→自動接続テスト→保存して開始。Client Key手入力はフォールバックとして残存
 - **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字で4ページ表示 (KEYCODE 93でサイクル: 1.デバッグログ → 2.スケジュール情報 → 3.端末/ネットワーク情報 → 4.PDFフォルダ命名マニュアル → 消去)
 - **ターゲット端末**: DS-ASTBX5 (Android STB)
 
@@ -61,6 +63,7 @@ jp.co.tisa.signage_android/
 - GET `/api/player/content/:id/file?key={client_key}` - PDFダウンロード
 - GET `/api/player/update/check?key={client_key}` - アップデートチェック
 - GET `/api/player/update/download?key={client_key}` - APKダウンロード
+- GET `/api/player/unassigned-clients` - 未割当クライアント一覧 (初期設定用・key不要、サーバー側実装依頼中)
 
 ## Key Design Decisions
 - minSdk = 24, targetSdk = 36
@@ -91,6 +94,11 @@ jp.co.tisa.signage_android/
 - デバッグオーバーレイ4ページ: debugPage(0-4)でサイクル管理、ページ2はコンテンツ切替時に自動更新、ページ3はハートビートBroadcast受信時に自動更新、ページ4は命名規約マニュアル(静的)
 - SignageServiceからACTION_HEARTBEAT Broadcast送信、PlayerActivityで受信して最終HB時刻記録
 - PDFレンダリングキャッシュ: PDF.jsレンダリング後にcanvas.toDataURL('image/jpeg', 0.85)でキャプチャ→onPageRendered()でAndroidに送信→JPEG保存。2回目以降はcached-pdf-viewer.htmlで<img>表示(PDF.jsパース+レンダリング完全スキップ)。キャッシュ検証はPDFファイルサイズ/更新日時+画面解像度
+- SMB URLテキスト: parseUrlsFromTxt()でhttp/https行のみ抽出、addWebItems()で1URL=1のtype=web PlaylistItemに展開(専用タイマー不要、通常の画面自動送りでローテーション)。URLリストは_metadata.jsonに永続化しオフライン時もbuildPlaylistFromCache()で再生可能
+- 命名規約の秒数フィールドは省略可: 正規表現 `(?:_(\d+))?` でオプショナル化、FileNameConfig.durationSecondsはInt?(null=親のデフォルト秒数)
+- screenKey(): web画面は"web:{url}"でキー生成(fromWebはcontentId=0のため全web画面が同一キーになる問題の回避。SMB再同期時の位置保持・差分判定用)
+- 初期設定の未割当クライアント選択: fetchUnassignedClients()はkey不要(初期設定時は未保有のため)。「未割当」=last_heartbeat IS NULL想定でHB送信開始により自動的にリストから消える。サーバーAPI未実装でも手入力フォールバックで運用可
+- オフライン耐性は意図的設計: サーバー停止時もキャッシュスケジュール+キャッシュPDFで再生継続(HB/更新チェック失敗は無視)。止まるのはweb画面の表示先サーバー断と未キャッシュ新規コンテンツのみ
 
 ## Release Checklist
 コード変更をリリースする際は、以下を**必ず全て**実行すること：
