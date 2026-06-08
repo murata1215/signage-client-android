@@ -1316,12 +1316,44 @@ class PlayerActivity : ComponentActivity() {
         preloadBothDirections()
     }
 
+    /**
+     * web画面を物理解像度幅でレイアウトさせるための初期スケール。
+     * Android WebViewは device-width = 物理px ÷ density となり、高密度STBでは
+     * ページが「狭い画面」とみなして文字が大きくなる。density打ち消し(100/density)で
+     * 物理解像度に1:1レイアウトさせ、Linux版同様に横いっぱい表示する。
+     */
+    private val webInitialScale: Int
+        get() = (100f / resources.displayMetrics.density).toInt().coerceAtLeast(1)
+
+    /**
+     * web画面のビューポートを物理解像度幅に強制し、densityに依存せずデスクトップ幅で
+     * レイアウトさせる。onPageFinishedで注入。
+     */
+    private fun injectWideViewport(view: WebView?) {
+        val w = resources.displayMetrics.widthPixels
+        view?.evaluateJavascript(
+            "(function(){" +
+                "var m=document.querySelector('meta[name=\"viewport\"]');" +
+                "if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');" +
+                "(document.head||document.documentElement).appendChild(m);}" +
+                "m.setAttribute('content','width=$w');" +
+                "})();",
+            null
+        )
+    }
+
     /** スクリーンをWebViewにロードする */
     private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
         when (screen.type) {
             "web" -> {
-                webView.webViewClient = WebViewClient()
+                webView.setInitialScale(webInitialScale)
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        injectWideViewport(view)
+                    }
+                }
                 webView.loadUrl(screen.url ?: return)
             }
             "pdf" -> {
@@ -1524,9 +1556,11 @@ class PlayerActivity : ComponentActivity() {
         webView.setInitialScale(100)
         when (screen.type) {
             "web" -> {
+                webView.setInitialScale(webInitialScale)
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
+                        injectWideViewport(view)
                         markPreloadReady(preloadType)
                     }
                 }
