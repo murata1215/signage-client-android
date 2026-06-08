@@ -950,8 +950,13 @@ class PlayerActivity : ComponentActivity() {
             }
             setBackgroundColor(0xCC000000.toInt())
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
-            setPadding(16, 8, 16, 8)
+            // density非依存の物理px指定。sp指定だと高密度STB(density2.0)で約2倍に
+            // 大きくなるため、画面高さ基準でLinux相当の絶対サイズに揃える。
+            setTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_PX,
+                resources.displayMetrics.heightPixels * 0.022f
+            )
+            setPadding(16, 6, 16, 6)
             visibility = View.VISIBLE
             setOnClickListener {
                 if (isPaused) resumePlayback()
