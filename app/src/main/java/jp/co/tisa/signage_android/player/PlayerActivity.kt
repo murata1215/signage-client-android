@@ -954,7 +954,7 @@ class PlayerActivity : ComponentActivity() {
             // 大きくなるため、画面高さ基準でLinux相当の絶対サイズに揃える。
             setTextSize(
                 android.util.TypedValue.COMPLEX_UNIT_PX,
-                resources.displayMetrics.heightPixels * 0.022f
+                resources.displayMetrics.heightPixels * 0.015f
             )
             setPadding(16, 6, 16, 6)
             visibility = View.VISIBLE
