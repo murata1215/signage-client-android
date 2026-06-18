@@ -40,9 +40,8 @@
         let pageTimer = null;
         let dualPageMode = false;
         let pageStep = 1;
-        // 先読み(INVISIBLE WebView)ではfalseにしてタイマースロットリングを回避し、
-        // active昇格時にbeginRotation()で次ページ予約を開始する。
-        let autoStartRotation = true;
+        // ページ送りはAndroid主導(androidAdvancePage)。WebView内のsetTimeoutは
+        // 非表示/合成中にスロットリングされるため使わない。
 
         function swapImages() {
             backImg.classList.remove('hidden');
@@ -79,7 +78,7 @@
          * isDual: デュアルページモードかどうか（ステータスバー用）
          * step: ページステップ（1=通常, 2=デュアル）
          */
-        // autoStart省略時はtrue（後方互換）。先読み時はfalseを渡し、active昇格時にbeginRotation()で開始する。
+        // 5番目以降の引数(autoStart)は後方互換のため受けるだけで使わない。
         window.loadCachedAllPages = function(pathsJson, duration, isDual, step, autoStart) {
             imagePaths = JSON.parse(pathsJson);
             totalScreens = imagePaths.length;
@@ -87,34 +86,18 @@
             dualPageMode = isDual || false;
             pageStep = step || 1;
             currentScreen = 0;
-            autoStartRotation = (autoStart === undefined) ? true : !!autoStart;
             showScreen(0);
         };
 
         /**
-         * active(VISIBLE)昇格時にAndroidから呼ぶ。先読み中に止めていた
-         * 次スクリーンへの予約を、現在スクリーンの再通知とともに開始する。
+         * Android主導のページ送り。pdfPageDuration秒ごとにAndroidから呼ばれる。
+         * 次スクリーンを表示したら'more'、最終スクリーン済みなら'done'を返す。
          */
-        window.beginRotation = function() {
-            autoStartRotation = true;
-            // 残留ステータス解消のため現在スクリーンを再通知してから次を予約
-            notifyPageChanged(currentScreen * pageStep + 1, totalScreens * pageStep);
-            scheduleNextScreen(currentScreen);
+        window.androidAdvancePage = function() {
+            if (currentScreen + 1 >= totalScreens) return 'done';
+            showScreen(currentScreen + 1);
+            return 'more';
         };
-
-        function scheduleNextScreen(index) {
-            if (pageTimer) { clearTimeout(pageTimer); pageTimer = null; }
-            if (index + 1 < totalScreens) {
-                pageTimer = setTimeout(function() {
-                    showScreen(index + 1);
-                }, pageDuration * 1000);
-            } else {
-                // 全スクリーン表示完了
-                if (window.SignageInterface && window.SignageInterface.onAllPagesCompleted) {
-                    window.SignageInterface.onAllPagesCompleted();
-                }
-            }
-        }
 
         function showScreen(index) {
             currentScreen = index;
@@ -125,13 +108,10 @@
                 var totalPages = totalScreens * pageStep;
                 // 最後のスクリーンが端数の場合を考慮（デュアルの奇数ページ等）
                 notifyPageChanged(pageNum, totalPages);
-                // 先読み中(autoStartRotation=false)は次を予約しない（beginRotationで開始）
-                if (autoStartRotation) scheduleNextScreen(index);
             };
             backImg.onerror = function() {
-                // 画像読み込みエラー → スキップ
+                // 画像読み込みエラー → 番号だけ通知
                 notifyPageChanged(index * pageStep + 1, totalScreens * pageStep);
-                if (autoStartRotation) scheduleNextScreen(index);
             };
             backImg.src = 'file://' + imagePaths[index];
         }

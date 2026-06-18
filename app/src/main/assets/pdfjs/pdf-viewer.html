@@ -58,9 +58,8 @@
         let isRendering = false;
         let dualPageMode = false;  // A4縦検出時にtrue
         let pageStep = 1;         // 1=通常, 2=デュアルページ
-        // ローテーション自動開始フラグ。先読み(INVISIBLE WebView)ではfalseにして
-        // 非表示WebViewでのタイマースロットリングを回避し、active昇格時にbeginRotation()で開始する。
-        let autoStartRotation = true;
+        // ページ送りはAndroid主導(androidAdvancePage)で行う。WebView内のsetTimeoutは
+        // 非表示/合成中にChromiumがスロットリングするため使わない。
 
         // レンダリングキャッシュ用
         let captureContentId = null;
@@ -133,9 +132,7 @@
                 pageStep = dualPageMode ? 2 : 1;
 
                 await renderCurrentPages();
-                if (!firstPageOnlyMode && autoStartRotation) {
-                    startPageRotation();
-                }
+                // ローテーションはAndroidがandroidAdvancePage()を周期実行して駆動する。
             } catch (err) {
                 console.error('PDF load error:', err);
             }
@@ -283,33 +280,19 @@
             }
         }
 
-        // setTimeout chain
-        function startPageRotation() {
-            stopPageTimer();
-            if (totalPages <= 1) return;
-            // For dual mode with single page total, no rotation needed
-            if (dualPageMode && totalPages <= 2) return;
-            scheduleNextPage();
-        }
-
-        function scheduleNextPage() {
-            pageTimer = setTimeout(async () => {
-                const nextStart = currentPage + pageStep;
-                if (nextStart > totalPages) {
-                    // All pages shown
-                    stopPageTimer();
-                    if (window.SignageInterface) {
-                        window.SignageInterface.onAllPagesCompleted();
-                    }
-                    return;
-                }
-                currentPage = nextStart;
-                await renderCurrentPages();
-                if (pageTimer !== null) {
-                    scheduleNextPage();
-                }
-            }, pageDuration * 1000);
-        }
+        /**
+         * Android主導のページ送り。pdfPageDuration秒ごとにAndroidから呼ばれる。
+         * 次ページを描画したら'more'、最終ページ済みなら'done'を返す。
+         * WebView内タイマーに依存しないため非表示/合成中でも確実に進む。
+         */
+        window.androidAdvancePage = function() {
+            if (firstPageOnlyMode || !pdfDoc) return 'done';
+            const nextStart = currentPage + pageStep;
+            if (nextStart > totalPages) return 'done';
+            currentPage = nextStart;
+            renderCurrentPages();  // notifyPageChanged + captureCurrentScreen も実行
+            return 'more';
+        };
 
         function stopPageTimer() {
             if (pageTimer !== null) {
@@ -319,11 +302,10 @@
         }
 
         // Called from Android
-        // autoStart省略時はtrue（後方互換）。先読み時はfalseを渡し、active昇格時にbeginRotation()で開始する。
+        // ページ送りはAndroid主導のため4番目以降の引数は使わない（後方互換のため受けるだけ）。
         window.loadPdfBase64 = function(base64Data, duration, firstPageOnly, autoStart) {
             stopPageTimer();
             pageDuration = duration || 10;
-            autoStartRotation = (autoStart === undefined) ? true : !!autoStart;
             try {
                 const binaryString = atob(base64Data);
                 const bytes = new Uint8Array(binaryString.length);
@@ -334,18 +316,6 @@
             } catch (err) {
                 console.error('Base64 decode error:', err);
             }
-        };
-
-        /**
-         * active(VISIBLE)昇格時にAndroidから呼ぶ。先読み中に止めていたページ
-         * ローテーションを、現在ページの再通知とともに開始する。
-         */
-        window.beginRotation = function() {
-            autoStartRotation = true;
-            if (firstPageOnlyMode || !pdfDoc) return;
-            // 残留ステータス解消のため現在ページを再通知してからローテーション開始
-            notifyPageChanged();
-            startPageRotation();
         };
 
         /**

@@ -94,6 +94,7 @@ class PlayerActivity : ComponentActivity() {
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var contentTimer: Runnable? = null
     private var countdownTimer: Runnable? = null
+    private var pdfPageTimer: Runnable? = null  // allPagesのページ送り(Android主導)
     private var remainingSeconds: Int = 0
     private var currentPdfPage: Int = 0
     private var totalPdfPages: Int = 0
@@ -591,6 +592,7 @@ class PlayerActivity : ComponentActivity() {
         if (flatScreens.isEmpty()) return
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
 
         if (isPaused) {
             currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
@@ -607,6 +609,7 @@ class PlayerActivity : ComponentActivity() {
         if (flatScreens.isEmpty()) return
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
 
         if (isPaused) {
             currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
@@ -657,7 +660,7 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[PLAY] 戻る → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
         if (debugPage == 2) updateDebugContent()
         updateScreenStatusBar(screen)
-        beginRotationIfNeeded(screen)
+        startPdfPageRotation(screen)
 
         // nextReady is true (old active already had content)
         nextReady = true
@@ -679,6 +682,7 @@ class PlayerActivity : ComponentActivity() {
 
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
         statusBar.text = formatStatusText(screen?.displayTitle ?: "", "⏸ 一時停止中 (中央ボタンで再開)")
 
         enableWebViewInteraction()
@@ -731,6 +735,7 @@ class PlayerActivity : ComponentActivity() {
         // 自動送り・カウントダウンを停止（オーバーレイ操作中はページが進まない）
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
 
         renderScreenList()
         updatePreviewThumbnail()
@@ -1319,6 +1324,7 @@ class PlayerActivity : ComponentActivity() {
         loadScreen(activeWebView!!, screen)
         updateScreenStatusBar(screen)
         scheduleAutoAdvance(screen)
+        startPdfPageRotation(screen)
         preloadBothDirections()
     }
 
@@ -1459,14 +1465,35 @@ class PlayerActivity : ComponentActivity() {
     }
 
     /**
-     * 先読み済みWebViewがactive(VISIBLE)に昇格した直後に、全頁モードの
-     * ページローテーションを開始する。先読み中(INVISIBLE)はタイマーが
-     * スロットリングされ進まないため、表示WebView上で明示的に開始する。
+     * 全頁モードのページ送りをAndroid主導で開始する。
+     * WebView内のsetTimeoutは非表示/合成中にChromiumがスロットリングするため、
+     * Androidのhandlerで pdfPageDuration 秒ごとに androidAdvancePage() を呼ぶ。
+     * 戻り値が"more"なら次を予約、"done"なら次コンテンツへ進む。
      */
-    private fun beginRotationIfNeeded(screen: FlatScreen) {
-        if (screen.isAllPages) {
-            activeWebView?.evaluateJavascript("if(window.beginRotation)beginRotation();", null)
+    private fun startPdfPageRotation(screen: FlatScreen) {
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer = null
+        if (!screen.isAllPages) return
+        val periodMs = ((screen.pdfPageDuration ?: 10) * 1000).toLong()
+        addDebugLog("[PDF] ページ送り開始(Android主導) ${periodMs / 1000}秒間隔")
+        lateinit var tick: Runnable
+        tick = Runnable {
+            val wv = activeWebView ?: return@Runnable
+            // 画面が切り替わっていれば残留タイマーは無視
+            if (pdfPageTimer !== tick) return@Runnable
+            wv.evaluateJavascript("(window.androidAdvancePage?androidAdvancePage():'done')") { result ->
+                if (pdfPageTimer !== tick) return@evaluateJavascript
+                val r = result?.trim('"')
+                if (r == "more") {
+                    handler.postDelayed(tick, periodMs)
+                } else {
+                    addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
+                    advanceToNext()
+                }
+            }
         }
+        pdfPageTimer = tick
+        handler.postDelayed(tick, periodMs)
     }
 
     /** タイマーをスケジュールする */
@@ -1500,6 +1527,7 @@ class PlayerActivity : ComponentActivity() {
             addDebugLog("[PLAY] 再生時間外になった → standby")
             contentTimer?.let { handler.removeCallbacks(it) }
             countdownTimer?.let { handler.removeCallbacks(it) }
+            pdfPageTimer?.let { handler.removeCallbacks(it) }
             isPlaying = false
             statusBar.text = "再生時間外 (${scheduleManager.playTimeRange})"
             showStandby()
@@ -1544,7 +1572,7 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[PLAY] advance → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
         if (debugPage == 2) updateDebugContent()
         updateScreenStatusBar(screen)
-        beginRotationIfNeeded(screen)
+        startPdfPageRotation(screen)
 
         // prevReady is true (old active already had content)
         prevReady = true
@@ -1691,10 +1719,9 @@ class PlayerActivity : ComponentActivity() {
                         )
                     } else {
                         val pathsJson = imagePaths.joinToString(",") { "\"${it.absolutePath}\"" }
-                        // 直接active表示のみ即ローテーション開始。先読みはbeginRotation()で昇格時に開始。
-                        val autoStart = preloadType == null
+                        // ページ送りはactive昇格時にstartPdfPageRotation()がAndroid主導で駆動する。
                         webView.evaluateJavascript(
-                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1, $autoStart);", null
+                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1);", null
                         )
                     }
                     markPreloadReady(preloadType)
@@ -1726,15 +1753,13 @@ class PlayerActivity : ComponentActivity() {
                 if (pdfBytes != null) {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
                     val duration = screen.pdfPageDuration ?: 10
-                    // 直接active表示(preloadType==null)のみ即ローテーション開始。
-                    // 先読みはbeginRotation()で昇格時に開始（非表示WebViewのタイマー停止回避）。
-                    val autoStart = preloadType == null
+                    // ページ送りはactive昇格時にstartPdfPageRotation()がAndroid主導で駆動する。
                     withContext(Dispatchers.Main) {
                         webView.evaluateJavascript(
                             "setCaptureInfo(${screen.contentId}, true);", null
                         )
                         webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', $duration, ${screen.firstPageOnly}, $autoStart);", null
+                            "loadPdfBase64('$base64', $duration, ${screen.firstPageOnly});", null
                         )
                         markPreloadReady(preloadType)
                     }
@@ -1844,6 +1869,7 @@ class PlayerActivity : ComponentActivity() {
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
 
         stopService(Intent(this, jp.co.tisa.signage_android.service.SignageService::class.java))
@@ -1868,6 +1894,7 @@ class PlayerActivity : ComponentActivity() {
         isPlaying = false
         contentTimer?.let { handler.removeCallbacks(it) }
         countdownTimer?.let { handler.removeCallbacks(it) }
+        pdfPageTimer?.let { handler.removeCallbacks(it) }
         longPressResetRunnable?.let { handler.removeCallbacks(it) }
         screenListTimeout?.let { handler.removeCallbacks(it) }
         pollingJob?.cancel()
@@ -1991,6 +2018,7 @@ class PlayerActivity : ComponentActivity() {
                 addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
                 contentTimer?.let { handler.removeCallbacks(it) }
                 countdownTimer?.let { handler.removeCallbacks(it) }
+                pdfPageTimer?.let { handler.removeCallbacks(it) }
                 advanceToNext()
             }
         }
