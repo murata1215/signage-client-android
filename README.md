@@ -10,6 +10,7 @@ Linux版 (Electron) の Android 移植版。
 - **Webコンテンツ表示** - WebView でURL表示
 - **PDFコンテンツ表示** - PDF.js (Web Worker有効 + Base64注入方式) でWebView内レンダリング、2キャンバススワップでちらつき防止、devicePixelRatio対応高解像度レンダリング、CMapローカルバンドルで日本語CIDフォント対応、デュアルPDF並列ロード/レンダリング
 - **PDFデュアルページ表示** - A4縦PDFを自動検出し見開き2ページ表示 (allPages: 同一PDF内 / firstPageOnly: 異なるPDF同士)
+- **PDF全ページ自動送り (allPages)** - 複数ページPDFを指定秒数ごとに自動ページ送り。ページ送りはAndroid側タイマー主導 (非表示WebViewのJSタイマースロットリング対策)、全ページ表示後に次コンテンツへ移行
 - **SMB PDFフォルダ表示** - Windows共有フォルダからPDF自動取得・差分同期・ローテーション表示 (smbj SMB2/3)、ファイル名規約による個別表示制御対応
 - **SMB URLテキスト表示** - SMBフォルダ内の `.txt` ファイル (URL記載) をWeb画面として表示。複数URL記載時は1URLずつ指定秒数でローテーション
 - **3-WebViewクロスフェード** - WebView 3枚 (active+next+prev) で前後先読み + 800msフェード

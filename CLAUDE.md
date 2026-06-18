@@ -76,7 +76,8 @@ jp.co.tisa.signage_android/
 - PDF高解像度: devicePixelRatio倍でcanvasレンダリング、CSSサイズで表示 → シャープ表示
 - allowFileAccessFromFileURLs=true でWebViewからローカルCMapファイル読み込み許可
 - PDF 2キャンバススワップ方式 (canvas A/B交互表示でページ切替時のちらつき完全防止)
-- PDF allPagesモード: ページ送りはpdf-viewer.html内setTimeoutチェーン管理、完了時onAllPagesCompleted()でAndroidに通知
+- PDF allPagesモード: ページ送りはAndroid主導(PlayerActivity.startPdfPageRotation)。handler.postDelayedでpdfPageDuration秒ごとにJS androidAdvancePage()を呼び、'more'/'wait'/'done'で次ページ送り・読込待ち・完了(advanceToNext)を制御。Chromiumの非表示WebViewタイマースロットリングでJS主導setTimeoutが停止する問題を回避(v1.76)
+- PDFは「先頭1枚(firstPageOnly)」か「全ページ(allPages)」の二択: FlatScreen.fromSubPdf/fromPdfで firstPageOnly = !isAllPages とし、allPages指定ファイルを親フォルダのfirstPageOnly既定で上書きしない(v1.77のページ送り停止バグ修正)
 - PDF デュアルページ自動判定: 1ページ目のviewport height>widthで縦長検出、allPagesは同一PDF内見開き、firstPageOnlyは異なるPDFの1ページ目同士をloadDualFirstPages()で見開き
 - WebView 3枚(active+next+prev)先読み+readyフラグでちらつき防止
 - PdfJsInterface にWebView参照を持たせ、activeWebViewからの通知のみステータスバー更新(先読みWebViewの干渉防止)
