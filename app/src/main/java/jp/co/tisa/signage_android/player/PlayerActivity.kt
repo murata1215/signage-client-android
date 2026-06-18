@@ -657,6 +657,7 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[PLAY] 戻る → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
         if (debugPage == 2) updateDebugContent()
         updateScreenStatusBar(screen)
+        beginRotationIfNeeded(screen)
 
         // nextReady is true (old active already had content)
         nextReady = true
@@ -1457,6 +1458,17 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 先読み済みWebViewがactive(VISIBLE)に昇格した直後に、全頁モードの
+     * ページローテーションを開始する。先読み中(INVISIBLE)はタイマーが
+     * スロットリングされ進まないため、表示WebView上で明示的に開始する。
+     */
+    private fun beginRotationIfNeeded(screen: FlatScreen) {
+        if (screen.isAllPages) {
+            activeWebView?.evaluateJavascript("if(window.beginRotation)beginRotation();", null)
+        }
+    }
+
     /** タイマーをスケジュールする */
     private fun scheduleAutoAdvance(screen: FlatScreen) {
         contentTimer?.let { handler.removeCallbacks(it) }
@@ -1532,6 +1544,7 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[PLAY] advance → ${currentScreenIndex + 1}/${flatScreens.size}: ${screen.displayName}")
         if (debugPage == 2) updateDebugContent()
         updateScreenStatusBar(screen)
+        beginRotationIfNeeded(screen)
 
         // prevReady is true (old active already had content)
         prevReady = true
@@ -1584,7 +1597,11 @@ class PlayerActivity : ComponentActivity() {
     private fun updateScreenStatusBar(screen: FlatScreen) {
         isAllPagesMode = screen.isAllPages
         pdfPageDurationSec = screen.pdfPageDuration ?: 10
-        remainingSeconds = screen.durationSeconds
+        // 前画面のページ表示(例: "(1/2)")の残留を消す。実値はonPageChangedで更新。
+        currentPdfPage = 1
+        totalPdfPages = 1
+        // 全頁モードのカウントダウンはper-page秒を起点に（durationSecondsは安全弁の総時間のため不適）
+        remainingSeconds = if (screen.isAllPages) pdfPageDurationSec else screen.durationSeconds
         startCountdown()
         maybeScheduleWebCapture(screen)
     }
@@ -1674,8 +1691,10 @@ class PlayerActivity : ComponentActivity() {
                         )
                     } else {
                         val pathsJson = imagePaths.joinToString(",") { "\"${it.absolutePath}\"" }
+                        // 直接active表示のみ即ローテーション開始。先読みはbeginRotation()で昇格時に開始。
+                        val autoStart = preloadType == null
                         webView.evaluateJavascript(
-                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1);", null
+                            "loadCachedAllPages('[$pathsJson]', $duration, false, 1, $autoStart);", null
                         )
                     }
                     markPreloadReady(preloadType)
@@ -1707,12 +1726,15 @@ class PlayerActivity : ComponentActivity() {
                 if (pdfBytes != null) {
                     val base64 = Base64.encodeToString(pdfBytes, Base64.NO_WRAP)
                     val duration = screen.pdfPageDuration ?: 10
+                    // 直接active表示(preloadType==null)のみ即ローテーション開始。
+                    // 先読みはbeginRotation()で昇格時に開始（非表示WebViewのタイマー停止回避）。
+                    val autoStart = preloadType == null
                     withContext(Dispatchers.Main) {
                         webView.evaluateJavascript(
                             "setCaptureInfo(${screen.contentId}, true);", null
                         )
                         webView.evaluateJavascript(
-                            "loadPdfBase64('$base64', $duration, ${screen.firstPageOnly});", null
+                            "loadPdfBase64('$base64', $duration, ${screen.firstPageOnly}, $autoStart);", null
                         )
                         markPreloadReady(preloadType)
                     }

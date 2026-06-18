@@ -58,6 +58,9 @@
         let isRendering = false;
         let dualPageMode = false;  // A4縦検出時にtrue
         let pageStep = 1;         // 1=通常, 2=デュアルページ
+        // ローテーション自動開始フラグ。先読み(INVISIBLE WebView)ではfalseにして
+        // 非表示WebViewでのタイマースロットリングを回避し、active昇格時にbeginRotation()で開始する。
+        let autoStartRotation = true;
 
         // レンダリングキャッシュ用
         let captureContentId = null;
@@ -130,7 +133,7 @@
                 pageStep = dualPageMode ? 2 : 1;
 
                 await renderCurrentPages();
-                if (!firstPageOnlyMode) {
+                if (!firstPageOnlyMode && autoStartRotation) {
                     startPageRotation();
                 }
             } catch (err) {
@@ -316,9 +319,11 @@
         }
 
         // Called from Android
-        window.loadPdfBase64 = function(base64Data, duration, firstPageOnly) {
+        // autoStart省略時はtrue（後方互換）。先読み時はfalseを渡し、active昇格時にbeginRotation()で開始する。
+        window.loadPdfBase64 = function(base64Data, duration, firstPageOnly, autoStart) {
             stopPageTimer();
             pageDuration = duration || 10;
+            autoStartRotation = (autoStart === undefined) ? true : !!autoStart;
             try {
                 const binaryString = atob(base64Data);
                 const bytes = new Uint8Array(binaryString.length);
@@ -329,6 +334,18 @@
             } catch (err) {
                 console.error('Base64 decode error:', err);
             }
+        };
+
+        /**
+         * active(VISIBLE)昇格時にAndroidから呼ぶ。先読み中に止めていたページ
+         * ローテーションを、現在ページの再通知とともに開始する。
+         */
+        window.beginRotation = function() {
+            autoStartRotation = true;
+            if (firstPageOnlyMode || !pdfDoc) return;
+            // 残留ステータス解消のため現在ページを再通知してからローテーション開始
+            notifyPageChanged();
+            startPageRotation();
         };
 
         /**
