@@ -101,8 +101,10 @@ data class FlatScreen(
             parentFolder: PlaylistItem,
             mainIndex: Int
         ): FlatScreen {
-            val isFirstPageOnly = parentFolder.firstPageOnly == true || subItem.pdfPageDuration == null
             val isAllPages = subItem.pdfPageDuration != null
+            // PDFは「先頭1枚(firstPageOnly)」か「全ページ(allPages)」の二択。
+            // allPages指定ファイルは親フォルダのfirstPageOnly既定で上書きしない（!isAllPagesで確定）。
+            val isFirstPageOnly = !isAllPages
             return FlatScreen(
                 type = "pdf",
                 displayName = subItem.name,

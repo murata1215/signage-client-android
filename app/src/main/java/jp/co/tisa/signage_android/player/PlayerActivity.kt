@@ -1483,12 +1483,13 @@ class PlayerActivity : ComponentActivity() {
             if (pdfPageTimer !== tick) return@Runnable
             wv.evaluateJavascript("(window.androidAdvancePage?androidAdvancePage():'done')") { result ->
                 if (pdfPageTimer !== tick) return@evaluateJavascript
-                val r = result?.trim('"')
-                if (r == "more") {
-                    handler.postDelayed(tick, periodMs)
-                } else {
-                    addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
-                    advanceToNext()
+                when (result?.trim('"')) {
+                    "more" -> handler.postDelayed(tick, periodMs)
+                    "wait" -> handler.postDelayed(tick, 1000L)  // PDF読込中、1秒後に再試行(最終的には安全弁が救済)
+                    else -> {
+                        addDebugLog("[PDF] 全ページ表示完了 → 次のコンテンツへ")
+                        advanceToNext()
+                    }
                 }
             }
         }

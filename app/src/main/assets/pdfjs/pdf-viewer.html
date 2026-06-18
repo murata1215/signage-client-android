@@ -286,7 +286,8 @@
          * WebView内タイマーに依存しないため非表示/合成中でも確実に進む。
          */
         window.androidAdvancePage = function() {
-            if (firstPageOnlyMode || !pdfDoc) return 'done';
+            if (!pdfDoc) return 'wait';   // まだ読み込み中 → Android側で短時間リトライ
+            if (firstPageOnlyMode) return 'done';
             const nextStart = currentPage + pageStep;
             if (nextStart > totalPages) return 'done';
             currentPage = nextStart;
