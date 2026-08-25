@@ -22,6 +22,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
@@ -1093,7 +1094,14 @@ class PlayerActivity : ComponentActivity() {
             setInitialScale(100)
             isFocusable = false
             isFocusableInTouchMode = false
-            webViewClient = WebViewClient()
+            webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    val crashed = detail?.didCrash() == true
+                    addDebugLog("[WEBVIEW] Render process gone (crashed=$crashed) - recovering...")
+                    handleWebViewCrash(view)
+                    return true
+                }
+            }
             webChromeClient = WebChromeClient()
             setBackgroundColor(0xFF000000.toInt())
         }
@@ -1365,6 +1373,12 @@ class PlayerActivity : ComponentActivity() {
                         super.onPageFinished(view, url)
                         injectWideViewport(view)
                     }
+                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                        val crashed = detail?.didCrash() == true
+                        addDebugLog("[WEBVIEW] Render process gone in web view (crashed=$crashed)")
+                        handleWebViewCrash(view)
+                        return true
+                    }
                 }
                 webView.loadUrl(screen.url ?: return)
             }
@@ -1609,6 +1623,12 @@ class PlayerActivity : ComponentActivity() {
                         super.onPageFinished(view, url)
                         injectWideViewport(view)
                         markPreloadReady(preloadType)
+                    }
+                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                        val crashed = detail?.didCrash() == true
+                        addDebugLog("[WEBVIEW] Render process gone in preload view (crashed=$crashed)")
+                        handleWebViewCrash(view)
+                        return true
                     }
                 }
                 webView.loadUrl(screen.url ?: return)
@@ -1881,6 +1901,76 @@ class PlayerActivity : ComponentActivity() {
         }
         startActivity(intent)
         finish()
+    }
+
+    // =========================================================================
+    // WebView Crash Recovery
+    // =========================================================================
+
+    /**
+     * WebViewのrender processがクラッシュした場合のリカバリ。
+     * クラッシュしたWebViewを破棄→再作成→再生を自動再開する。
+     */
+    private fun handleWebViewCrash(crashedView: WebView?) {
+        if (crashedView == null) return
+
+        val isActive = crashedView == activeWebView
+        val isNext = crashedView == nextWebView
+        val isPrev = crashedView == prevWebView
+
+        addDebugLog("[WEBVIEW] Recovering ${if (isActive) "active" else if (isNext) "next" else "prev"} WebView")
+
+        try {
+            (crashedView.parent as? ViewGroup)?.removeView(crashedView)
+            crashedView.destroy()
+        } catch (e: Exception) {
+            addDebugLog("[WEBVIEW] WebView destroy error: ${e.message}")
+        }
+
+        // 新しいWebViewを作成してコンテナに追加(touchOverlayより下に)
+        val newWebView = createWebView()
+        containerLayout.addView(newWebView, 0)
+
+        // 変数参照を更新
+        when {
+            crashedView === webViewA -> webViewA = newWebView
+            crashedView === webViewB -> webViewB = newWebView
+            crashedView === webViewC -> webViewC = newWebView
+        }
+
+        if (isActive) {
+            activeWebView = newWebView
+            newWebView.visibility = View.VISIBLE
+            // 現在のスクリーンを再ロード
+            val screen = flatScreens.getOrNull(currentScreenIndex)
+            if (screen != null) {
+                loadScreen(newWebView, screen)
+                updateScreenStatusBar(screen)
+                startPdfPageRotation(screen)
+                scheduleAutoAdvance(screen)
+            }
+            // 先読みも再実行
+            preloadBothDirections()
+        } else {
+            if (isNext) nextWebView = newWebView
+            if (isPrev) prevWebView = newWebView
+            newWebView.visibility = View.INVISIBLE
+            // クラッシュした先読みWebViewの再ロード
+            if (flatScreens.isNotEmpty()) {
+                if (isNext) {
+                    nextReady = false
+                    val nextIdx = (currentScreenIndex + 1) % flatScreens.size
+                    preloadScreen(newWebView, flatScreens[nextIdx], isPrevPreload = false)
+                }
+                if (isPrev) {
+                    prevReady = false
+                    val prevIdx = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+                    preloadScreen(newWebView, flatScreens[prevIdx], isPrevPreload = true)
+                }
+            }
+        }
+
+        addDebugLog("[WEBVIEW] Recovery complete")
     }
 
     // =========================================================================
