@@ -28,6 +28,9 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -180,6 +183,9 @@ class PlayerActivity : ComponentActivity() {
 
         // Setup gesture detector
         setupGestureDetector()
+
+        // Setup WebView proxy (before creating WebViews)
+        setupWebViewProxy()
 
         // Setup views
         setupViews()
@@ -880,6 +886,54 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
     // View Setup
     // =========================================================================
+
+    /**
+     * WebViewのプロキシ設定。社内プロキシを経由しつつ、
+     * ローカルIPや社内ドメインはバイパスする。
+     */
+    private fun setupWebViewProxy() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            addDebugLog("[PROXY] ProxyController not supported on this device")
+            return
+        }
+        try {
+            val proxyConfig = ProxyConfig.Builder()
+                .addProxyRule("210.175.128.100:8080")
+                // ローカルIPレンジをバイパス
+                .addBypassRule("10.*")
+                .addBypassRule("172.16.*")
+                .addBypassRule("172.17.*")
+                .addBypassRule("172.18.*")
+                .addBypassRule("172.19.*")
+                .addBypassRule("172.20.*")
+                .addBypassRule("172.21.*")
+                .addBypassRule("172.22.*")
+                .addBypassRule("172.23.*")
+                .addBypassRule("172.24.*")
+                .addBypassRule("172.25.*")
+                .addBypassRule("172.26.*")
+                .addBypassRule("172.27.*")
+                .addBypassRule("172.28.*")
+                .addBypassRule("172.29.*")
+                .addBypassRule("172.30.*")
+                .addBypassRule("172.31.*")
+                .addBypassRule("192.168.*")
+                .addBypassRule("localhost")
+                .addBypassRule("127.0.0.1")
+                // 社内ドメインをバイパス
+                .addBypassRule("*.atg.co.jp")
+                .addBypassRule("*.tisaweb.or.jp")
+                .addBypassRule("*.internal.*")
+                .build()
+            ProxyController.getInstance().setProxyOverride(
+                proxyConfig,
+                { it.run() },  // executor: run on caller thread
+                { addDebugLog("[PROXY] WebView proxy configured") }
+            )
+        } catch (e: Exception) {
+            addDebugLog("[PROXY] Failed to set WebView proxy: ${e.message}")
+        }
+    }
 
     private fun setupFullScreen() {
         WindowCompat.setDecorFitsSystemWindows(window, false)

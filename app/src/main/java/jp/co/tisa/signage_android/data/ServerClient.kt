@@ -24,7 +24,7 @@ class ServerClient(private val config: SignageConfig) {
         "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
         "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
         "172.30.", "172.31.", "192.168.", "localhost", "127.0.0.1",
-        "atg.co.jp"
+        "atg.co.jp", "tisaweb.or.jp"
     )
 
     private val proxyClient: OkHttpClient by lazy {
