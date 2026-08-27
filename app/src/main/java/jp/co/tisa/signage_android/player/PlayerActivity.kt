@@ -1416,6 +1416,109 @@ class PlayerActivity : ComponentActivity() {
         )
     }
 
+    // =========================================================================
+    // Web auto-fit scale (v1.80)
+    // 固定幅レガシー画面(intramart等)が左上に小さく表示される問題への対応。
+    // オプトイン方式: 許可リストに載ったURLのみJSを注入し、他ページは完全に無変更。
+    // =========================================================================
+
+    /** 自動フィット対象URL（部分一致）。空 + APPLY_TO_ALL=false なら機能OFF */
+    private val WEB_AUTOFIT_URL_PATTERNS = listOf("dev-lafit20.internal.tisaweb.or.jp")
+    /** true にすると全web画面に適用（既定はfalse＝許可リストのみ） */
+    private val WEB_AUTOFIT_APPLY_TO_ALL = false
+    /** コンテンツ幅がビューポートのこの割合未満なら拡大 */
+    private val WEB_AUTOFIT_THRESHOLD = 0.95f
+    /** 拡大の上限倍率 */
+    private val WEB_AUTOFIT_MAX_ZOOM = 3.0f
+    /** 測定タイミング(ms)。ページ側 init() の実行待ちのため複数回試行 */
+    private val WEB_AUTOFIT_DELAYS_MS = longArrayOf(500L, 2000L)
+
+    /**
+     * 許可リストに一致するURLのみ、遅延測定で自動フィット拡大を実行する。
+     * 一致しなければ何もしない（既存ページへの影響ゼロを保証）。
+     */
+    private fun scheduleAutoFit(view: WebView?, url: String?) {
+        if (view == null) return
+        val target = url ?: return
+        val allowed = WEB_AUTOFIT_APPLY_TO_ALL ||
+            WEB_AUTOFIT_URL_PATTERNS.any { target.contains(it) }
+        if (!allowed) return
+        for (delay in WEB_AUTOFIT_DELAYS_MS) {
+            handler.postDelayed({ injectAutoFitScale(view) }, delay)
+        }
+    }
+
+    /**
+     * 実表示コンテンツの横幅を測定し、ビューポート幅に対して小さければ
+     * body.style.zoom で拡大する。vh/vw等ビューポート単位はzoomの影響を
+     * 受けないため、zoom前にビューポート高さ相当の要素を検出して
+     * 物理高さを維持するよう個別に補正する(下部が切れるのを防止)。
+     */
+    private fun injectAutoFitScale(view: WebView?) {
+        view?.evaluateJavascript(
+            "(function(){" +
+                "try{" +
+                // (a) 前回適用ぶんをリセット
+                "document.body.style.zoom='';" +
+                "var prev=document.querySelectorAll('[data-sig-vh]');" +
+                "for(var i=0;i<prev.length;i++){" +
+                "  prev[i].style.height=prev[i].getAttribute('data-sig-vh');" +
+                "  prev[i].removeAttribute('data-sig-vh');" +
+                "}" +
+                // (b) 実表示コンテンツの横範囲を測定
+                "var minLeft=Infinity,maxRight=-Infinity;" +
+                "function consider(r){" +
+                "  if(r.width>0&&r.height>0){" +
+                "    if(r.left<minLeft)minLeft=r.left;" +
+                "    if(r.right>maxRight)maxRight=r.right;" +
+                "  }" +
+                "}" +
+                "var tw=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false);" +
+                "var n;" +
+                "while(n=tw.nextNode()){" +
+                "  if(n.nodeValue&&n.nodeValue.trim().length>0&&n.parentElement){" +
+                "    consider(n.parentElement.getBoundingClientRect());" +
+                "  }" +
+                "}" +
+                "var media=document.querySelectorAll('img,svg,canvas,video');" +
+                "for(var j=0;j<media.length;j++){consider(media[j].getBoundingClientRect());}" +
+                "if(!isFinite(minLeft)||!isFinite(maxRight)){return 'nocontent';}" +
+                "var contentWidth=maxRight-minLeft;" +
+                "var vw=window.innerWidth;" +
+                "var vh=window.innerHeight;" +
+                // (c) 判定
+                "if(contentWidth>=vw*$WEB_AUTOFIT_THRESHOLD){return 'skip:'+contentWidth;}" +
+                "var z=Math.min(vw/contentWidth,$WEB_AUTOFIT_MAX_ZOOM);" +
+                // (d) vh補正のため、zoom前にビューポート高さ相当の要素を記録
+                "var all=document.body.querySelectorAll('*');" +
+                "var targets=[];" +
+                "for(var k=0;k<all.length;k++){" +
+                "  var el=all[k];" +
+                "  var h=el.getBoundingClientRect().height;" +
+                "  if(h>=vh*0.85&&h<=vh*1.15){targets.push([el,h]);}" +
+                "}" +
+                // (e) zoom適用
+                "document.body.style.zoom=z;" +
+                // (f) 記録した要素の物理高さを維持するよう補正
+                "for(var m=0;m<targets.length;m++){" +
+                "  var el2=targets[m][0];var h2=targets[m][1];" +
+                "  el2.setAttribute('data-sig-vh',el2.style.height||'');" +
+                "  el2.style.height=(h2/z)+'px';" +
+                "}" +
+                "return 'zoom='+z.toFixed(2)+' content='+Math.round(contentWidth)+'px vw='+vw;" +
+                "}catch(e){return 'error:'+e.message;}" +
+                "})();",
+            { result ->
+                val cleaned = result?.trim('"') ?: "null"
+                if (cleaned.startsWith("zoom=")) {
+                    addDebugLog("[WEBFIT] $cleaned")
+                } else if (cleaned.startsWith("error:")) {
+                    addDebugLog("[WEBFIT] $cleaned")
+                }
+            }
+        )
+    }
+
     /** スクリーンをWebViewにロードする */
     private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
@@ -1426,6 +1529,7 @@ class PlayerActivity : ComponentActivity() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         injectWideViewport(view)
+                        scheduleAutoFit(view, url)
                     }
                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                         val crashed = detail?.didCrash() == true
@@ -1676,6 +1780,7 @@ class PlayerActivity : ComponentActivity() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         injectWideViewport(view)
+                        scheduleAutoFit(view, url)
                         markPreloadReady(preloadType)
                     }
                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {

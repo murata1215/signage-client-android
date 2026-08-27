@@ -29,6 +29,9 @@ Android版サイネージクライアント。サーバー(signage-server)から
 - **SMB PDFフォルダ命名規約**: ファイル名で表示制御 ({順番}_{ページ制御}_{開始日}_{終了日}[_{秒}]_{説明}.pdf|.txt)、秒は省略可(省略時は親のデフォルト秒数)、規約外ファイルはデフォルト動作
 - **初期設定簡略化**: サーバーURLデフォルトプリセット(https://service.internal.atg.co.jp/tsinternal/signage-server-windows) + 未割当クライアント一覧(GET /api/player/unassigned-clients、key不要)から選択→自動接続テスト→保存して開始。Client Key手入力はフォールバックとして残存
 - **デバッグオーバーレイ**: 画面右半分×縦いっぱいに緑文字で4ページ表示 (KEYCODE 93でサイクル: 1.デバッグログ → 2.スケジュール情報 → 3.端末/ネットワーク情報 → 4.PDFフォルダ命名マニュアル → 消去)
+- **WebViewクラッシュ復旧**: onRenderProcessGone()検知でクラッシュしたWebViewを破棄・再生成し再生継続(v1.78)
+- **WebView用プロキシバイパス**: androidx.webkit ProxyControllerで社内ドメイン等をプロキシ経由せず直接接続(v1.79)
+- **Web画面自動フィット拡大**: 固定幅レガシー画面(intramart等)を許可リストURLのみ自動でズーム拡大表示(v1.80)
 - **ターゲット端末**: DS-ASTBX5 (Android STB)
 
 ## Package Structure
@@ -100,6 +103,9 @@ jp.co.tisa.signage_android/
 - screenKey(): web画面は"web:{url}"でキー生成(fromWebはcontentId=0のため全web画面が同一キーになる問題の回避。SMB再同期時の位置保持・差分判定用)
 - 初期設定の未割当クライアント選択: fetchUnassignedClients()はkey不要(初期設定時は未保有のため)。「未割当」=last_heartbeat IS NULL想定でHB送信開始により自動的にリストから消える。サーバーAPI未実装でも手入力フォールバックで運用可
 - オフライン耐性は意図的設計: サーバー停止時もキャッシュスケジュール+キャッシュPDFで再生継続(HB/更新チェック失敗は無視)。止まるのはweb画面の表示先サーバー断と未キャッシュ新規コンテンツのみ
+- WebViewクラッシュ復旧(v1.78): createWebView()のwebViewClientでonRenderProcessGone()をオーバーライドしtrueを返す(自前復旧)。handleWebViewCrash()でクラッシュしたWebViewをcontainerLayoutから除去してdestroy()、createWebView()で新規生成しwebViewA/B/C・active/next/prevの参照を差し替え。activeWebViewの場合は現在画面を再ロード+ページ送りタイマー再開+両方向先読み再開、next/prevの場合は該当方向のみ再プリロード。loadScreen()/preloadScreen()のWebViewClientにも同様のoverrideを追加(3箇所)
+- WebView用プロキシバイパス(v1.79): WebViewはChromium自前のネットワークスタックを使うため、ServerClient.ktのOkHttp bypassPrefixesはWeb表示コンテンツには効かない。androidx.webkit.ProxyController.setProxyOverride()でWebView自体にプロキシ+バイパスルールを設定(setupWebViewProxy()、onCreate()でsetupViews()前に呼び出し)。WebViewFeature.PROXY_OVERRIDE非対応端末では機能スキップ。ServerClient.ktのbypassPrefixesにも"tisaweb.or.jp"を追加(OkHttp側は既存のまま個別対応)
+- Web画面自動フィット拡大(v1.80): 固定幅レガシー画面(intramartの工程状況表等、viewport meta無し+px固定コンテンツ幅)が広いviewportに対して左上に小さく表示される問題への対応。オプトイン方式(WEB_AUTOFIT_URL_PATTERNS部分一致 + WEB_AUTOFIT_APPLY_TO_ALL=false既定)で許可リスト外のURLにはJSを一切注入せず既存ページを完全に無変更に保つ。scheduleAutoFit()がonPageFinished後に複数回遅延実行(ページ側initが未完了の可能性のため)、injectAutoFitScale()がTreeWalker(SHOW_TEXT)+img/svg/canvas/videoで実表示コンテンツの横幅を測定しcontentWidth<viewport×95%ならbody.style.zoomで拡大(上限3.0倍)。CSS zoomはvh/vw等ビューポート単位を伸縮しないため、zoom前にビューポート高さ相当(innerHeight×0.85〜1.15)の要素を検出しdata-sig-vh属性へ元の高さを退避、zoom後にheight=元高さ÷zで再設定して物理サイズを維持(下部が切れるのを防止)。loadScreen()/preloadScreen()両方のonPageFinishedにinjectWideViewport()の直後で呼び出し
 
 ## Release Checklist
 コード変更をリリースする際は、以下を**必ず全て**実行すること：
