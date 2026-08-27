@@ -1426,10 +1426,14 @@ class PlayerActivity : ComponentActivity() {
     private val WEB_AUTOFIT_URL_PATTERNS = listOf("dev-lafit20.internal.tisaweb.or.jp")
     /** true にすると全web画面に適用（既定はfalse＝許可リストのみ） */
     private val WEB_AUTOFIT_APPLY_TO_ALL = false
-    /** コンテンツ幅がビューポートのこの割合未満なら拡大 */
+    /** コンテンツ右端がビューポートのこの割合未満なら拡大 */
     private val WEB_AUTOFIT_THRESHOLD = 0.95f
     /** 拡大の上限倍率 */
     private val WEB_AUTOFIT_MAX_ZOOM = 3.0f
+    /** 右端に残す安全マージン（1.0=ぴったり）。丸め誤差・スクロールバー対策 */
+    private val WEB_AUTOFIT_SAFETY = 0.99f
+    /** zoom適用後の検証・自己補正の最大回数 */
+    private val WEB_AUTOFIT_VERIFY_PASSES = 2
     /** 測定タイミング(ms)。ページ側 init() の実行待ちのため複数回試行 */
     private val WEB_AUTOFIT_DELAYS_MS = longArrayOf(500L, 2000L)
 
@@ -1449,8 +1453,12 @@ class PlayerActivity : ComponentActivity() {
     }
 
     /**
-     * 実表示コンテンツの横幅を測定し、ビューポート幅に対して小さければ
-     * body.style.zoom で拡大する。vh/vw等ビューポート単位はzoomの影響を
+     * 実表示コンテンツの右端座標を測定し、ビューポート幅に対して小さければ
+     * body.style.zoom で拡大する。CSS zoomは文書原点(0,0)基準で拡大するため、
+     * 判定・倍率計算は「幅」ではなく「右端座標(maxRight)」を基準にする
+     * (幅基準だとminLeft分だけ右にはみ出すバグがあったため v1.81 で修正)。
+     * さらにzoom適用後に再測定し、はみ出していれば自己補正する(最大
+     * WEB_AUTOFIT_VERIFY_PASSES回)。vh/vw等ビューポート単位はzoomの影響を
      * 受けないため、zoom前にビューポート高さ相当の要素を検出して
      * 物理高さを維持するよう個別に補正する(下部が切れるのを防止)。
      */
@@ -1458,63 +1466,81 @@ class PlayerActivity : ComponentActivity() {
         view?.evaluateJavascript(
             "(function(){" +
                 "try{" +
-                // (a) 前回適用ぶんをリセット
-                "document.body.style.zoom='';" +
-                "var prev=document.querySelectorAll('[data-sig-vh]');" +
-                "for(var i=0;i<prev.length;i++){" +
-                "  prev[i].style.height=prev[i].getAttribute('data-sig-vh');" +
-                "  prev[i].removeAttribute('data-sig-vh');" +
-                "}" +
-                // (b) 実表示コンテンツの横範囲を測定
-                "var minLeft=Infinity,maxRight=-Infinity;" +
-                "function consider(r){" +
-                "  if(r.width>0&&r.height>0){" +
-                "    if(r.left<minLeft)minLeft=r.left;" +
-                "    if(r.right>maxRight)maxRight=r.right;" +
+                "function reset(){" +
+                "  document.body.style.zoom='';" +
+                "  var prev=document.querySelectorAll('[data-sig-vh]');" +
+                "  for(var i=0;i<prev.length;i++){" +
+                "    prev[i].style.height=prev[i].getAttribute('data-sig-vh');" +
+                "    prev[i].removeAttribute('data-sig-vh');" +
                 "  }" +
                 "}" +
-                "var tw=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false);" +
-                "var n;" +
-                "while(n=tw.nextNode()){" +
-                "  if(n.nodeValue&&n.nodeValue.trim().length>0&&n.parentElement){" +
-                "    consider(n.parentElement.getBoundingClientRect());" +
+                // 実表示コンテンツの左右端(文書座標)を測定
+                "function measure(){" +
+                "  var minLeft=Infinity,maxRight=-Infinity;" +
+                "  function consider(r){" +
+                "    if(r.width>0&&r.height>0){" +
+                "      var l=r.left+window.pageXOffset;" +
+                "      var rr=r.right+window.pageXOffset;" +
+                "      if(l<minLeft)minLeft=l;" +
+                "      if(rr>maxRight)maxRight=rr;" +
+                "    }" +
+                "  }" +
+                "  var tw=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false);" +
+                "  var n;" +
+                "  while(n=tw.nextNode()){" +
+                "    if(n.nodeValue&&n.nodeValue.trim().length>0&&n.parentElement){" +
+                "      consider(n.parentElement.getBoundingClientRect());" +
+                "    }" +
+                "  }" +
+                "  var media=document.querySelectorAll('img,svg,canvas,video');" +
+                "  for(var j=0;j<media.length;j++){consider(media[j].getBoundingClientRect());}" +
+                "  if(!isFinite(minLeft)||!isFinite(maxRight))return null;" +
+                "  return {left:minLeft,right:maxRight};" +
+                "}" +
+                // zoom適用 + vh相当要素の物理高さ補正(下部切れ防止)
+                "function apply(z){" +
+                "  reset();" +
+                "  var vh=window.innerHeight;" +
+                "  var all=document.body.querySelectorAll('*');" +
+                "  var targets=[];" +
+                "  for(var k=0;k<all.length;k++){" +
+                "    var el=all[k];" +
+                "    var h=el.getBoundingClientRect().height;" +
+                "    if(h>=vh*0.85&&h<=vh*1.15){targets.push([el,h]);}" +
+                "  }" +
+                "  document.body.style.zoom=z;" +
+                "  for(var m=0;m<targets.length;m++){" +
+                "    var el2=targets[m][0];var h2=targets[m][1];" +
+                "    el2.setAttribute('data-sig-vh',el2.style.height||'');" +
+                "    el2.style.height=(h2/z)+'px';" +
                 "  }" +
                 "}" +
-                "var media=document.querySelectorAll('img,svg,canvas,video');" +
-                "for(var j=0;j<media.length;j++){consider(media[j].getBoundingClientRect());}" +
-                "if(!isFinite(minLeft)||!isFinite(maxRight)){return 'nocontent';}" +
-                "var contentWidth=maxRight-minLeft;" +
-                "var vw=window.innerWidth;" +
-                "var vh=window.innerHeight;" +
-                // (c) 判定
-                "if(contentWidth>=vw*$WEB_AUTOFIT_THRESHOLD){return 'skip:'+contentWidth;}" +
-                "var z=Math.min(vw/contentWidth,$WEB_AUTOFIT_MAX_ZOOM);" +
-                // (d) vh補正のため、zoom前にビューポート高さ相当の要素を記録
-                "var all=document.body.querySelectorAll('*');" +
-                "var targets=[];" +
-                "for(var k=0;k<all.length;k++){" +
-                "  var el=all[k];" +
-                "  var h=el.getBoundingClientRect().height;" +
-                "  if(h>=vh*0.85&&h<=vh*1.15){targets.push([el,h]);}" +
+                "reset();" +
+                "var avail=document.documentElement.clientWidth||window.innerWidth;" +
+                "var m0=measure();" +
+                "if(!m0){return 'nocontent';}" +
+                "if(m0.right>=avail*$WEB_AUTOFIT_THRESHOLD){" +
+                "  return 'skip right0='+Math.round(m0.right)+' avail='+avail;" +
                 "}" +
-                // (e) zoom適用
-                "document.body.style.zoom=z;" +
-                // (f) 記録した要素の物理高さを維持するよう補正
-                "for(var m=0;m<targets.length;m++){" +
-                "  var el2=targets[m][0];var h2=targets[m][1];" +
-                "  el2.setAttribute('data-sig-vh',el2.style.height||'');" +
-                "  el2.style.height=(h2/z)+'px';" +
+                "var z=Math.min(avail*$WEB_AUTOFIT_SAFETY/m0.right,$WEB_AUTOFIT_MAX_ZOOM);" +
+                "apply(z);" +
+                "var pass=0;" +
+                "for(;pass<$WEB_AUTOFIT_VERIFY_PASSES;pass++){" +
+                "  var mv=measure();" +
+                "  if(!mv)break;" +
+                "  if(mv.right<=avail*$WEB_AUTOFIT_SAFETY)break;" +
+                "  z=z*(avail*$WEB_AUTOFIT_SAFETY)/mv.right;" +
+                "  apply(z);" +
                 "}" +
-                "return 'zoom='+z.toFixed(2)+' content='+Math.round(contentWidth)+'px vw='+vw;" +
+                "var mf=measure();" +
+                "return 'zoom='+z.toFixed(2)+' right0='+Math.round(m0.right)+" +
+                "' fit='+(mf?Math.round(mf.right):-1)+' avail='+avail+" +
+                "' left='+Math.round(m0.left)+' pass='+pass;" +
                 "}catch(e){return 'error:'+e.message;}" +
                 "})();",
             { result ->
                 val cleaned = result?.trim('"') ?: "null"
-                if (cleaned.startsWith("zoom=")) {
-                    addDebugLog("[WEBFIT] $cleaned")
-                } else if (cleaned.startsWith("error:")) {
-                    addDebugLog("[WEBFIT] $cleaned")
-                }
+                addDebugLog("[WEBFIT] $cleaned")
             }
         )
     }
