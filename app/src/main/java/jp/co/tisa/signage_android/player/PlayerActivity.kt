@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -1162,7 +1163,18 @@ class PlayerActivity : ComponentActivity() {
                     return true
                 }
             }
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                    // ERRORレベルのみ拾う(低ノイズ)。YouTube以外の画面のJSエラー切り分けにも有用(v1.84)
+                    if (consoleMessage?.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        addDebugLog(
+                            "[JS-ERR] ${consoleMessage.message()} " +
+                                "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
+                        )
+                    }
+                    return true
+                }
+            }
             setBackgroundColor(0xFF000000.toInt())
         }
         wv.addJavascriptInterface(PdfJsInterface(wv), "SignageInterface")
@@ -1577,6 +1589,8 @@ class PlayerActivity : ComponentActivity() {
      * 未指定/取得漏れ時のフェイルセーフとしてこの値を用いる。
      */
     private val YOUTUBE_MAX_DURATION_SEC = 3600
+    /** YouTube: 先読み中に onYoutubeReady() が来ない場合に強制readyにするまでの時間(ms)(v1.84) */
+    private val YOUTUBE_PRELOAD_READY_TIMEOUT_MS = 15000L
 
     /** YouTube IFrame Player APIのorigin検証用ベースURL(エラー153対策、v1.83) */
     private val YOUTUBE_PLAYER_BASE_URL = "https://www.youtube.com"
@@ -1644,20 +1658,34 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** YouTube: プレイヤーページのHTML本体(assets)。初回読み込み時にキャッシュする(v1.83) */
-    private var youtubePlayerHtmlCache: String? = null
+    /** YouTube: プレイヤーページのHTMLテンプレート(assets)。初回読み込み時にキャッシュする(v1.83) */
+    private var youtubePlayerHtmlTemplateCache: String? = null
 
     /**
-     * assets/youtube-player.html をテキストとして読み込む。
+     * assets/youtube-player.html のテンプレートをテキストとして読み込む(キャッシュ付き)。
      * file:///android_asset/ からのloadUrl()ではWebViewのoriginがfile://になり、
      * YouTube IFrame Player APIのorigin検証に失敗してエラー153になるため、
      * loadDataWithBaseURL()でhttpsオリジンを付与して読み込む(v1.83)。
      */
-    private fun loadYoutubePlayerHtml(): String {
-        youtubePlayerHtmlCache?.let { return it }
+    private fun loadYoutubePlayerHtmlTemplate(): String {
+        youtubePlayerHtmlTemplateCache?.let { return it }
         val html = assets.open("youtube-player.html").bufferedReader(Charsets.UTF_8).use { it.readText() }
-        youtubePlayerHtmlCache = html
+        youtubePlayerHtmlTemplateCache = html
         return html
+    }
+
+    /**
+     * 動画ID等をテンプレートに埋め込んだ完成HTMLを返す(v1.84)。
+     * 以前は onPageFinished 後に evaluateJavascript() で値を渡していたが、
+     * loadDataWithBaseURL() のURL正規化でbaseUrlに末尾スラッシュが付与されるため
+     * onPageFinished側のURL比較が常にfalseになり ytLoad() が一度も呼ばれないバグがあった。
+     * HTMLに値を先に埋め込む方式にしてタイミング依存を根絶する。
+     */
+    private fun buildYoutubeHtml(videoId: String, muted: Boolean, autoplay: Boolean): String {
+        return loadYoutubePlayerHtmlTemplate()
+            .replace("__VIDEO_ID__", videoId)
+            .replace("__MUTED__", muted.toString())
+            .replace("__AUTOPLAY__", autoplay.toString())
     }
 
     /** YouTube画面のロード（アクティブ=autoplay、先読み=無音ロードのみ） */
@@ -1666,13 +1694,7 @@ class PlayerActivity : ComponentActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                // loadDataWithBaseURL("https://www.youtube.com", ...) 読み込み時、
-                // onPageFinishedのurlはbaseUrl("https://www.youtube.com")として通知される(v1.83)
-                if (url == YOUTUBE_PLAYER_BASE_URL) {
-                    view?.evaluateJavascript(
-                        "ytLoad('${screen.youtubeId}', $YOUTUBE_MUTED, $autoplay);", null
-                    )
-                }
+                addDebugLog("[YT] onPageFinished url=$url")
             }
             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                 val crashed = detail?.didCrash() == true
@@ -1681,10 +1703,22 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
         }
+        addDebugLog("[YT] load videoId=${screen.youtubeId} muted=$YOUTUBE_MUTED autoplay=$autoplay preload=$preloadType")
         // https オリジンを付与して読み込む(エラー153対策、v1.83)。file:///android_asset/直読みは行わない。
         webView.loadDataWithBaseURL(
-            YOUTUBE_PLAYER_BASE_URL, loadYoutubePlayerHtml(), "text/html", "utf-8", null
+            YOUTUBE_PLAYER_BASE_URL,
+            buildYoutubeHtml(screen.youtubeId ?: "", YOUTUBE_MUTED, autoplay),
+            "text/html", "utf-8", null
         )
+        // 先読み時、何らかの理由でonYoutubeReady()が来なくてもdoAdvance()の無限リトライに
+        // ならないよう、一定時間後に強制的にready扱いにする(v1.84)。markPreloadReadyは冪等。
+        if (preloadType != null) {
+            handler.postDelayed({
+                if (webView == nextWebView || webView == prevWebView) {
+                    markPreloadReady(preloadType)
+                }
+            }, YOUTUBE_PRELOAD_READY_TIMEOUT_MS)
+        }
     }
 
     /** PDF画面のロード（キャッシュチェック付き） */
@@ -1951,7 +1985,8 @@ class PlayerActivity : ComponentActivity() {
             }
             "youtube" -> {
                 loadScreenYoutube(webView, screen, preloadType)
-                // markPreloadReadyはonYoutubeReady()から呼ばれる(準備完了を待つ)
+                // markPreloadReadyは通常onYoutubeReady()から呼ばれる(準備完了を待つ)。
+                // タイムアウト時はloadScreenYoutube内のフォールバックが強制的に呼ぶ(v1.84)
             }
         }
     }
@@ -2465,7 +2500,7 @@ class PlayerActivity : ComponentActivity() {
             handler.post {
                 if (webView != activeWebView) return@post
                 val screen = flatScreens.getOrNull(currentScreenIndex)
-                if (screen?.type == "youtube" && screen.playToEnd) {
+                if (screen?.type == "youtube" && screen.playToEnd && YOUTUBE_ADVANCE_ON_END) {
                     addDebugLog("[YT] 再生終了 → 次のコンテンツへ")
                     contentTimer?.let { handler.removeCallbacks(it) }
                     advanceToNext()
@@ -2473,7 +2508,7 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        /** YouTube: エラー通知（削除済み・埋め込み禁止・読込失敗等）。固まらず次のコンテンツへ */
+        /** YouTube: エラー通知（削除済み・埋め込み禁止・読込失敗・onReadyタイムアウト等）。固まらず次のコンテンツへ */
         @JavascriptInterface
         fun onYoutubeError(code: Int) {
             handler.post {
@@ -2481,6 +2516,15 @@ class PlayerActivity : ComponentActivity() {
                 addDebugLog("[YT] エラー(code=$code) → 次のコンテンツへ")
                 contentTimer?.let { handler.removeCallbacks(it) }
                 advanceToNext()
+            }
+        }
+
+        /** YouTube: JS側の各段階をデバッグオーバーレイへ転送(v1.84) */
+        @JavascriptInterface
+        fun onYoutubeLog(msg: String) {
+            handler.post {
+                val tag = if (webView == activeWebView) "active" else "preload"
+                addDebugLog("[YT-JS:$tag] $msg")
             }
         }
     }

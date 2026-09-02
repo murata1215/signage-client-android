@@ -1,14 +1,21 @@
 <!DOCTYPE html>
 <!--
-  YouTube動画再生用ラッパー (v1.83)
+  YouTube動画再生用ラッパー (v1.84)
   YouTube IFrame Player API を使い、AndroidPlayerActivity(SignageInterface)から
-  ytLoad()/ytPlay()/ytStop() で制御される。
+  ytPlay()/ytStop() で制御される。
 
   設計方針:
-  - 先読み時は autoplay=false でロードのみ行い、再生はしない
+  - 動画ID/ミュート/自動再生の指定は、AndroidがCONFIGプレースホルダを置換した状態で
+    このHTML自体を loadDataWithBaseURL() で読み込む(v1.84)。
+    以前は onPageFinished 後に evaluateJavascript() で渡していたが、
+    loadDataWithBaseURL のURL正規化で baseUrl に末尾スラッシュが付与されるため
+    onPageFinished 側のURL比較が常にfalseになり ytLoad() が一度も呼ばれない
+    バグがあった。HTMLに値を埋め込む方式にしてタイミング依存を根絶する。
+  - 先読み時はautoplay=falseでロードのみ行い、再生はしない
     (3枚WebViewローテーションの非表示WebViewで裏再生され音が鳴るのを防止)
   - アクティブ昇格時にAndroid側からytPlay()が呼ばれて初めて再生開始
   - onStateChange(ENDED) / onError はSignageInterfaceへ通知し、Android側で次画面へ進む判断をする
+  - 各段階をSignageInterface.onYoutubeLog()でAndroid側デバッグオーバーレイに送る(v1.84)
   - このHTMLは file:///android_asset/ から直接loadUrl()せず、PlayerActivity側で
     loadDataWithBaseURL("https://www.youtube.com", ...) 経由で読み込むこと(v1.83)。
     file:// originのままIFrame APIを使うとorigin検証に失敗しエラー153になるため。
@@ -49,10 +56,17 @@
   </div>
 
   <script>
+    // Android側(buildYoutubeHtml)がプレースホルダを実値に置換してから読み込む(v1.84)
+    var CONFIG = {
+      videoId: '__VIDEO_ID__',
+      muted: __MUTED__,
+      autoplay: __AUTOPLAY__
+    };
+
     var player = null;
-    var pendingLoad = null;   // ytLoad()がAPI準備前に呼ばれた場合の保留パラメータ
     var apiReady = false;
     var apiFailTimer = null;
+    var readyWatchdogTimer = null;
     var currentMuted = true;
 
     function notify(fn) {
@@ -66,10 +80,17 @@
       return function() {};
     }
 
+    function log(msg) {
+      try { notify('onYoutubeLog')(String(msg)); } catch (e) {}
+    }
+
+    log('script start videoId=' + CONFIG.videoId + ' muted=' + CONFIG.muted + ' autoplay=' + CONFIG.autoplay);
+
     // IFrame API のロードに失敗した場合(プロキシ遮断・オフライン等)、
-    // 一定時間onYoutubeReadyが来なければエラー通知して再生が固まらないようにする。
+    // 一定時間onYouTubeIframeAPIReadyが来なければエラー通知して再生が固まらないようにする。
     apiFailTimer = setTimeout(function() {
       if (!apiReady) {
+        log('api load timeout(10s)');
         notify('onYoutubeError')(-1);
       }
     }, 10000);
@@ -83,12 +104,9 @@
     // グローバルコールバック(YouTube IFrame APIの規約)
     window.onYouTubeIframeAPIReady = function() {
       apiReady = true;
+      log('api ready');
       if (apiFailTimer) { clearTimeout(apiFailTimer); apiFailTimer = null; }
-      if (pendingLoad) {
-        var p = pendingLoad;
-        pendingLoad = null;
-        doLoad(p.videoId, p.muted, p.autoplay);
-      }
+      doLoad(CONFIG.videoId, CONFIG.muted, CONFIG.autoplay);
     };
 
     function doLoad(videoId, muted, autoplay) {
@@ -97,6 +115,11 @@
         try { player.destroy(); } catch (e) {}
         player = null;
       }
+      // プレイヤー生成watchdog: 15秒以内にonReadyが来なければ次へ進めるようエラー通知(v1.84)
+      readyWatchdogTimer = setTimeout(function() {
+        log('onReady watchdog timeout(15s)');
+        notify('onYoutubeError')(-2);
+      }, 15000);
       player = new YT.Player('yt-player', {
         videoId: videoId,
         playerVars: {
@@ -115,6 +138,8 @@
         },
         events: {
           onReady: function(event) {
+            if (readyWatchdogTimer) { clearTimeout(readyWatchdogTimer); readyWatchdogTimer = null; }
+            log('onReady');
             if (currentMuted) {
               try { event.target.mute(); } catch (e) {}
             }
@@ -124,30 +149,20 @@
             notify('onYoutubeReady')();
           },
           onStateChange: function(event) {
+            log('stateChange=' + event.data);
             // YT.PlayerState.ENDED === 0
             if (event.data === 0) {
               notify('onYoutubeEnded')();
             }
           },
           onError: function(event) {
+            log('onError code=' + event.data);
             notify('onYoutubeError')(event.data);
           }
         }
       });
+      log('player created');
     }
-
-    /**
-     * 動画をロードする。videoId=YouTube動画ID(11文字)、muted=ミュート再生するか、
-     * autoplay=true ならロード後すぐ再生開始(アクティブ画面用)、
-     * false ならロードのみで再生しない(先読み用。準備完了はonYoutubeReadyで通知)。
-     */
-    window.ytLoad = function(videoId, muted, autoplay) {
-      if (!apiReady) {
-        pendingLoad = { videoId: videoId, muted: muted, autoplay: autoplay };
-        return;
-      }
-      doLoad(videoId, muted, autoplay);
-    };
 
     /** アクティブ昇格時にAndroidから呼ばれ、再生を開始する */
     window.ytPlay = function() {
