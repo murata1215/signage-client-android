@@ -1570,8 +1570,16 @@ class PlayerActivity : ComponentActivity() {
     private val YOUTUBE_MUTED = true
     /** YouTube: duration_seconds<=0 のとき動画の最後まで再生して次へ進む */
     private val YOUTUBE_ADVANCE_ON_END = true
-    /** YouTube: 最後まで再生モードの安全弁(秒)。onYoutubeEnded()が来なくてもこれを超えたら強制的に次へ */
+    /**
+     * YouTube: 最後まで再生モードの安全弁(秒)。onYoutubeEnded()が来なくてもこれを超えたら強制的に次へ。
+     * ライブ配信(ENDEDが来ない)や再生時間不明のコンテンツが無限に居座らないための上限。
+     * 通常運用ではライブは管理画面でduration_secondsを明示指定する想定だが、
+     * 未指定/取得漏れ時のフェイルセーフとしてこの値を用いる。
+     */
     private val YOUTUBE_MAX_DURATION_SEC = 3600
+
+    /** YouTube IFrame Player APIのorigin検証用ベースURL(エラー153対策、v1.83) */
+    private val YOUTUBE_PLAYER_BASE_URL = "https://www.youtube.com"
 
     /**
      * 各種YouTube URL形式から動画ID(11文字)を抽出。取れなければnull。
@@ -1636,13 +1644,31 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /** YouTube: プレイヤーページのHTML本体(assets)。初回読み込み時にキャッシュする(v1.83) */
+    private var youtubePlayerHtmlCache: String? = null
+
+    /**
+     * assets/youtube-player.html をテキストとして読み込む。
+     * file:///android_asset/ からのloadUrl()ではWebViewのoriginがfile://になり、
+     * YouTube IFrame Player APIのorigin検証に失敗してエラー153になるため、
+     * loadDataWithBaseURL()でhttpsオリジンを付与して読み込む(v1.83)。
+     */
+    private fun loadYoutubePlayerHtml(): String {
+        youtubePlayerHtmlCache?.let { return it }
+        val html = assets.open("youtube-player.html").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        youtubePlayerHtmlCache = html
+        return html
+    }
+
     /** YouTube画面のロード（アクティブ=autoplay、先読み=無音ロードのみ） */
     private fun loadScreenYoutube(webView: WebView, screen: FlatScreen, preloadType: String?) {
         val autoplay = preloadType == null
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                if (url?.contains("youtube-player.html") == true) {
+                // loadDataWithBaseURL("https://www.youtube.com", ...) 読み込み時、
+                // onPageFinishedのurlはbaseUrl("https://www.youtube.com")として通知される(v1.83)
+                if (url == YOUTUBE_PLAYER_BASE_URL) {
                     view?.evaluateJavascript(
                         "ytLoad('${screen.youtubeId}', $YOUTUBE_MUTED, $autoplay);", null
                     )
@@ -1655,7 +1681,10 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
         }
-        webView.loadUrl("file:///android_asset/youtube-player.html")
+        // https オリジンを付与して読み込む(エラー153対策、v1.83)。file:///android_asset/直読みは行わない。
+        webView.loadDataWithBaseURL(
+            YOUTUBE_PLAYER_BASE_URL, loadYoutubePlayerHtml(), "text/html", "utf-8", null
+        )
     }
 
     /** PDF画面のロード（キャッシュチェック付き） */

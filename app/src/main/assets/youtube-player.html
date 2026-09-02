@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  YouTube動画再生用ラッパー (v1.82)
+  YouTube動画再生用ラッパー (v1.83)
   YouTube IFrame Player API を使い、AndroidPlayerActivity(SignageInterface)から
   ytLoad()/ytPlay()/ytStop() で制御される。
 
@@ -9,6 +9,9 @@
     (3枚WebViewローテーションの非表示WebViewで裏再生され音が鳴るのを防止)
   - アクティブ昇格時にAndroid側からytPlay()が呼ばれて初めて再生開始
   - onStateChange(ENDED) / onError はSignageInterfaceへ通知し、Android側で次画面へ進む判断をする
+  - このHTMLは file:///android_asset/ から直接loadUrl()せず、PlayerActivity側で
+    loadDataWithBaseURL("https://www.youtube.com", ...) 経由で読み込むこと(v1.83)。
+    file:// originのままIFrame APIを使うとorigin検証に失敗しエラー153になるため。
 -->
 <html>
 <head>
@@ -104,7 +107,11 @@
           iv_load_policy: 3,
           fs: 0,
           disablekb: 1,
-          autoplay: autoplay ? 1 : 0
+          autoplay: autoplay ? 1 : 0,
+          // enablejsapi=1相当(IFrame API使用時は暗黙的に有効)でorigin検証が行われるため、
+          // このページの読み込み元(loadDataWithBaseURLで付与するbaseUrl)と一致させる。
+          // 不一致だとエラー153(invalid embed / referer未確認)になる(v1.83)
+          origin: 'https://www.youtube.com'
         },
         events: {
           onReady: function(event) {
