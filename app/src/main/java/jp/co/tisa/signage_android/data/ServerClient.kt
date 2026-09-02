@@ -164,6 +164,34 @@ class ServerClient(private val config: SignageConfig) {
         }
     }
 
+    /**
+     * YouTube関連ドメインへの疎通プローブ(v1.85)。
+     * 152-4等のYouTube再生エラーが「プロキシがgooglevideo.com等の配信/認証系ドメインを
+     * 塞いでいる」ことに起因していないかを実測で切り分けるための診断用メソッド。
+     * 既存のプロキシ設定(getClient())をそのまま再利用する。
+     * 戻り値はデバッグオーバーレイに1行で表示する簡易フォーマット。
+     */
+    suspend fun probeYoutubeConnectivity(): String = withContext(Dispatchers.IO) {
+        val targets = listOf(
+            "yt" to "https://www.youtube.com/favicon.ico",
+            "google" to "https://www.google.com/generate_204",
+            "ytimg" to "https://i.ytimg.com/favicon.ico",
+            "gvideo" to "https://redirector.googlevideo.com/generate_204",
+            "ncookie" to "https://www.youtube-nocookie.com/favicon.ico"
+        )
+        val results = targets.map { (label, url) ->
+            val status = try {
+                val request = Request.Builder().url(url).get().build()
+                val response = getClient(url).newCall(request).execute()
+                response.use { it.code.toString() }
+            } catch (e: Exception) {
+                "NG(${e.javaClass.simpleName})"
+            }
+            "$label=$status"
+        }
+        results.joinToString(" ")
+    }
+
     suspend fun downloadApk(downloadPath: String, destFile: File): Boolean = withContext(Dispatchers.IO) {
         try {
             val url = if (downloadPath.startsWith("http")) {

@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  YouTube動画再生用ラッパー (v1.84)
+  YouTube動画再生用ラッパー (v1.85)
   YouTube IFrame Player API を使い、AndroidPlayerActivity(SignageInterface)から
   ytPlay()/ytStop() で制御される。
 
@@ -19,6 +19,12 @@
   - このHTMLは file:///android_asset/ から直接loadUrl()せず、PlayerActivity側で
     loadDataWithBaseURL("https://www.youtube.com", ...) 経由で読み込むこと(v1.83)。
     file:// originのままIFrame APIを使うとorigin検証に失敗しエラー153になるため。
+  - 再生開始watchdog(v1.85): onReadyが来てYT.Playerが生成されても、YouTube側が
+    エラーコード152等をプレイヤー内部UIとして表示するだけでonErrorを発火させない
+    ケースがある。この場合、onReady後に再生状態をポーリングし、一定時間内に
+    再生が始まらなければ onYoutubeStalled() をAndroid側へ通知する。
+    Android側はこれを受けて「loadDataWithBaseURL経由のラッパーHTML」を介さず
+    YouTubeの/embed/ページへ直接loadUrl()するフォールバックに切り替える。
 -->
 <html>
 <head>
@@ -67,7 +73,14 @@
     var apiReady = false;
     var apiFailTimer = null;
     var readyWatchdogTimer = null;
+    var playWatchdogTimer = null;
+    var playWatchdogElapsed = 0;
+    var stalledNotified = false;
     var currentMuted = true;
+
+    // 再生開始watchdogの猶予秒数(v1.85): onReady後この秒数以内に再生状態(PLAYING)へ
+    // 遷移しなければ再生不能とみなしonYoutubeStalled()を通知する
+    var PLAY_WATCHDOG_SEC = 12;
 
     function notify(fn) {
       try {
@@ -83,6 +96,13 @@
     function log(msg) {
       try { notify('onYoutubeLog')(String(msg)); } catch (e) {}
     }
+
+    // 環境ログ(v1.85): 実機の実UA/実オリジン/Refererをデバッグオーバーレイで直読できるようにする
+    try {
+      log('env href=' + location.href);
+      log('env referrer=' + document.referrer);
+      log('env ua=' + navigator.userAgent);
+    } catch (e) {}
 
     log('script start videoId=' + CONFIG.videoId + ' muted=' + CONFIG.muted + ' autoplay=' + CONFIG.autoplay);
 
@@ -115,6 +135,9 @@
         try { player.destroy(); } catch (e) {}
         player = null;
       }
+      if (playWatchdogTimer) { clearInterval(playWatchdogTimer); playWatchdogTimer = null; }
+      playWatchdogElapsed = 0;
+      stalledNotified = false;
       // プレイヤー生成watchdog: 15秒以内にonReadyが来なければ次へ進めるようエラー通知(v1.84)
       readyWatchdogTimer = setTimeout(function() {
         log('onReady watchdog timeout(15s)');
@@ -145,23 +168,66 @@
             }
             if (autoplay) {
               try { event.target.playVideo(); } catch (e) {}
+              startPlayWatchdog();
             }
             notify('onYoutubeReady')();
           },
           onStateChange: function(event) {
             log('stateChange=' + event.data);
+            // YT.PlayerState.PLAYING === 1: 再生が始まったのでwatchdogは不要
+            if (event.data === 1 && playWatchdogTimer) {
+              clearInterval(playWatchdogTimer);
+              playWatchdogTimer = null;
+              log('watch cleared(playing)');
+            }
             // YT.PlayerState.ENDED === 0
             if (event.data === 0) {
+              if (playWatchdogTimer) { clearInterval(playWatchdogTimer); playWatchdogTimer = null; }
               notify('onYoutubeEnded')();
             }
           },
           onError: function(event) {
             log('onError code=' + event.data);
+            if (playWatchdogTimer) { clearInterval(playWatchdogTimer); playWatchdogTimer = null; }
             notify('onYoutubeError')(event.data);
           }
         }
       });
       log('player created');
+    }
+
+    /**
+     * 再生開始watchdog(v1.85): onReady後、再生状態が実際にPLAYINGへ遷移するかを監視する。
+     * 152等のエラーはonErrorを発火させずプレイヤー内部UIとして表示されるだけのことがあるため、
+     * 状態とcurrentTimeの実測でしか検知できない。PLAY_WATCHDOG_SEC以内にPLAYINGへ
+     * 遷移しなければ、再生不能とみなしonYoutubeStalled()を通知する。
+     */
+    function startPlayWatchdog() {
+      if (playWatchdogTimer) { clearInterval(playWatchdogTimer); playWatchdogTimer = null; }
+      playWatchdogElapsed = 0;
+      playWatchdogTimer = setInterval(function() {
+        playWatchdogElapsed++;
+        var state = -99;
+        var t = -1;
+        try { if (player && typeof player.getPlayerState === 'function') { state = player.getPlayerState(); } } catch (e) {}
+        try { if (player && typeof player.getCurrentTime === 'function') { t = player.getCurrentTime(); } } catch (e) {}
+        log('watch state=' + state + ' t=' + (typeof t === 'number' ? t.toFixed(2) : t));
+        // YT.PlayerState.PLAYING === 1
+        if (state === 1) {
+          clearInterval(playWatchdogTimer);
+          playWatchdogTimer = null;
+          return;
+        }
+        if (playWatchdogElapsed >= PLAY_WATCHDOG_SEC) {
+          clearInterval(playWatchdogTimer);
+          playWatchdogTimer = null;
+          if (!stalledNotified) {
+            stalledNotified = true;
+            log('watchdog: playback did not start within ' + PLAY_WATCHDOG_SEC + 's');
+            notify('onYoutubeStalled')();
+          }
+        }
+      }, 1000);
     }
 
     /** アクティブ昇格時にAndroidから呼ばれ、再生を開始する */

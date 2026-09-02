@@ -31,6 +31,7 @@ import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
+import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -94,6 +95,13 @@ class PlayerActivity : ComponentActivity() {
     private var activeWebView: WebView? = null
     private var nextWebView: WebView? = null
     private var prevWebView: WebView? = null
+
+    /** createWebView()で決定した端末既定UA。YouTube画面から復元する際に使う(v1.85) */
+    private var defaultUserAgent: String = ""
+    /** YouTube疎通プローブの結果文字列(デバッグオーバーレイ表示用)(v1.85) */
+    private var youtubeProbeResult: String = "未実施"
+    /** WebView実装のパッケージ名・バージョン文字列(デバッグオーバーレイ表示用)(v1.85) */
+    private var webViewImplInfo: String = "取得中"
 
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -220,6 +228,29 @@ class PlayerActivity : ComponentActivity() {
         pdfRenderCacheManager = PdfRenderCacheManager(this)
         smbPdfManager = SmbPdfManager(this)
 
+        // WebView実装バージョンを取得(デバッグオーバーレイ表示用)(v1.85)
+        try {
+            val pkg = WebViewCompat.getCurrentWebViewPackage(this)
+            webViewImplInfo = if (pkg != null) "${pkg.packageName} ${pkg.versionName}" else "取得失敗"
+        } catch (e: Exception) {
+            webViewImplInfo = "取得失敗(${e.message})"
+        }
+
+        // YouTube関連ドメインへの疎通プローブ(起動時に1回)(v1.85)
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val result = serverClient.probeYoutubeConnectivity()
+                withContext(Dispatchers.Main) {
+                    youtubeProbeResult = result
+                    addDebugLog("[YT] 疎通 $result")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    youtubeProbeResult = "失敗(${e.message})"
+                }
+            }
+        }
+
         // Start playback
         addDebugLog("[INIT] startPlayback 開始")
         statusBar.text = "初期化中..."
@@ -325,6 +356,13 @@ class PlayerActivity : ComponentActivity() {
             sb.append("ネットワーク: 取得失敗\n")
         }
         sb.append("プロキシ: 210.175.128.100:8080\n")
+
+        // ── WebView / YouTube診断(v1.85) ──
+        sb.append("${"─".repeat(20)}\n")
+        sb.append("WebView: $webViewImplInfo\n")
+        val uaDisplay = defaultUserAgent.takeLast(70)
+        sb.append("UA: ...$uaDisplay\n")
+        sb.append("YT疎通: $youtubeProbeResult\n")
 
         // ── サーバー・画面 ──
         sb.append("${"─".repeat(20)}\n")
@@ -1147,9 +1185,13 @@ class PlayerActivity : ComponentActivity() {
                 displayZoomControls = false
                 setSupportZoom(false)
                 textZoom = 100
-                userAgentString = settings.userAgentString.replace(
+                val computedUa = settings.userAgentString.replace(
                     Regex("\\bwv\\b"), ""
                 ) + " Chrome/120.0.0.0"
+                userAgentString = computedUa
+                // YouTube画面から復元する際に使う既定UA(v1.85)。web/PDF画面の挙動は変えないため
+                // 既存の計算式(壊れているが影響範囲不明のため温存)をそのまま保持する。
+                defaultUserAgent = computedUa
                 mediaPlaybackRequiresUserGesture = false  // YouTube等の自動再生を許可(v1.82)
             }
             setInitialScale(100)
@@ -1596,6 +1638,38 @@ class PlayerActivity : ComponentActivity() {
     private val YOUTUBE_PLAYER_BASE_URL = "https://www.youtube.com"
 
     /**
+     * YouTube画面専用のUser-Agent(v1.85)。
+     * createWebView()の既定UAは `settings.userAgentString.replace(Regex("wv"),"") + " Chrome/120.0.0.0"`
+     * という式のため、Chrome/バージョン+Mobile Safari/バージョンの後ろにさらに
+     * Chrome/120.0.0.0が連結され「Chrome/トークンが2個ある不正なUA」になってしまっている
+     * (先頭に出るのは端末実機の古いChromiumバージョン)。YouTubeはUAでブラウザ世代を
+     * 判定するため、これが再生拒否(152等)の一因になっている可能性がある。
+     * YouTube画面ではこの単一トークンの正規UAに一時的に差し替え、それ以外の画面
+     * (intramart等の自動フィット拡大が前提の既存Web画面)には一切影響させない。
+     */
+    private val YOUTUBE_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    /** YouTube: 再生開始watchdogがstalledを検知した際、直接embedページで代替再生する際の表示秒数(v1.85) */
+    private val YOUTUBE_FALLBACK_DURATION_SEC = 60
+
+    /** YouTube: 直接embedフォールバック実施済みを示すWebView.tagの値(v1.85) */
+    private val YT_FALLBACK_TAG = "yt_fallback"
+
+    /**
+     * 画面種別に応じてUAを切り替える(v1.85)。
+     * YouTube画面のみYOUTUBE_USER_AGENTを使い、それ以外は端末既定UA(defaultUserAgent)に
+     * 復元する。web画面の自動フィット拡大(v1.80)等、既存挙動への影響をゼロにするため。
+     */
+    private fun applyUserAgentForScreen(webView: WebView, screen: FlatScreen) {
+        val target = if (screen.type == "youtube") YOUTUBE_USER_AGENT else defaultUserAgent
+        if (target.isNotEmpty() && webView.settings.userAgentString != target) {
+            webView.settings.userAgentString = target
+        }
+    }
+
+    /**
      * 各種YouTube URL形式から動画ID(11文字)を抽出。取れなければnull。
      * 対応: watch?v=ID / youtu.be/ID / embed/ID / shorts/ID / 生の11文字ID
      */
@@ -1628,6 +1702,7 @@ class PlayerActivity : ComponentActivity() {
     /** スクリーンをWebViewにロードする */
     private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
+        applyUserAgentForScreen(webView, screen)
         when (screen.type) {
             "web" -> {
                 webView.setInitialScale(webInitialScale)
@@ -1691,6 +1766,8 @@ class PlayerActivity : ComponentActivity() {
     /** YouTube画面のロード（アクティブ=autoplay、先読み=無音ロードのみ） */
     private fun loadScreenYoutube(webView: WebView, screen: FlatScreen, preloadType: String?) {
         val autoplay = preloadType == null
+        // このWebViewでの直接embedフォールバック実施フラグをリセット(v1.85)
+        webView.tag = null
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
@@ -1703,7 +1780,7 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
         }
-        addDebugLog("[YT] load videoId=${screen.youtubeId} muted=$YOUTUBE_MUTED autoplay=$autoplay preload=$preloadType")
+        addDebugLog("[YT] load videoId=${screen.youtubeId} muted=$YOUTUBE_MUTED autoplay=$autoplay preload=$preloadType ua=...${YOUTUBE_USER_AGENT.takeLast(40)}")
         // https オリジンを付与して読み込む(エラー153対策、v1.83)。file:///android_asset/直読みは行わない。
         webView.loadDataWithBaseURL(
             YOUTUBE_PLAYER_BASE_URL,
@@ -1719,6 +1796,48 @@ class PlayerActivity : ComponentActivity() {
                 }
             }, YOUTUBE_PRELOAD_READY_TIMEOUT_MS)
         }
+    }
+
+    /**
+     * YouTube: 再生開始watchdogがstalled(152等でonReady後も再生が始まらない)を検知した際、
+     * IFrame APIラッパー(loadDataWithBaseURL経由の合成オリジン)を介さず、
+     * YouTubeの/embed/ページへ直接loadUrl()するフォールバック(v1.85)。
+     * このページはSignageInterfaceを参照しないため、onYoutubeEnded()/onError()等のJS通知は
+     * 一切来なくなる。そのためENDEDではなくYOUTUBE_FALLBACK_DURATION_SEC秒の尺タイマーで
+     * 強制的に次の画面へ進める。1画面につき1回だけ実施(webView.tagで判定)。
+     */
+    private fun fallbackToDirectEmbed(webView: WebView, screen: FlatScreen) {
+        if (webView.tag == YT_FALLBACK_TAG) return
+        webView.tag = YT_FALLBACK_TAG
+        val id = screen.youtubeId
+        if (id.isNullOrEmpty()) {
+            addDebugLog("[YT] フォールバック不可(videoId無し) → 次のコンテンツへ")
+            advanceToNext()
+            return
+        }
+        val embedUrl = "https://www.youtube.com/embed/$id" +
+            "?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&fs=0&disablekb=1"
+        addDebugLog("[YT] 直接embedへフォールバック: $embedUrl")
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                addDebugLog("[YT] フォールバックonPageFinished url=$url")
+            }
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val crashed = detail?.didCrash() == true
+                addDebugLog("[WEBVIEW] Render process gone in youtube fallback view (crashed=$crashed)")
+                handleWebViewCrash(view)
+                return true
+            }
+        }
+        webView.loadUrl(embedUrl)
+        // フォールバック中はJSからのENDED通知が来ないため、尺タイマーのみで進行を担保する
+        contentTimer?.let { handler.removeCallbacks(it) }
+        val fallbackDuration = (YOUTUBE_FALLBACK_DURATION_SEC * 1000).toLong()
+        contentTimer = Runnable {
+            addDebugLog("[YT] フォールバック尺タイマー発火(${YOUTUBE_FALLBACK_DURATION_SEC}秒) → 次のコンテンツへ")
+            advanceToNext()
+        }.also { handler.postDelayed(it, fallbackDuration) }
     }
 
     /** PDF画面のロード（キャッシュチェック付き） */
@@ -1958,6 +2077,7 @@ class PlayerActivity : ComponentActivity() {
     private fun preloadScreen(webView: WebView, screen: FlatScreen, isPrevPreload: Boolean) {
         val preloadType = if (isPrevPreload) "prev" else "next"
         webView.setInitialScale(100)
+        applyUserAgentForScreen(webView, screen)
         when (screen.type) {
             "web" -> {
                 webView.setInitialScale(webInitialScale)
@@ -2516,6 +2636,23 @@ class PlayerActivity : ComponentActivity() {
                 addDebugLog("[YT] エラー(code=$code) → 次のコンテンツへ")
                 contentTimer?.let { handler.removeCallbacks(it) }
                 advanceToNext()
+            }
+        }
+
+        /**
+         * YouTube: 再生開始watchdog発火通知(v1.85)。
+         * onReadyまで到達しYT.Playerは生成されたが、152等でYouTube側が再生を拒否し
+         * かつonErrorも発火しない(プレイヤー内部UIとして表示されるだけの)ケースを検知した通知。
+         * IFrame APIラッパーを介さない直接embedページへのフォールバックに切り替える。
+         */
+        @JavascriptInterface
+        fun onYoutubeStalled() {
+            handler.post {
+                if (webView != activeWebView) return@post
+                val screen = flatScreens.getOrNull(currentScreenIndex)
+                if (screen?.type != "youtube") return@post
+                addDebugLog("[YT] 再生開始せず(watchdog) → 直接embedへフォールバック")
+                fallbackToDirectEmbed(webView, screen)
             }
         }
 
