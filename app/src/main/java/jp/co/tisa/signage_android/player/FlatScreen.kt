@@ -11,7 +11,7 @@ import java.io.File
  * ナビゲーションは currentScreenIndex の増減のみで完結する。
  */
 data class FlatScreen(
-    /** 表示タイプ: "web", "pdf", "dual_pdf" */
+    /** 表示タイプ: "web", "pdf", "dual_pdf", "youtube" */
     val type: String,
     /** 内部表示名（ファイル名そのまま。ログ/デバッグ用） */
     val displayName: String,
@@ -43,6 +43,12 @@ data class FlatScreen(
     // --- WEB用 ---
     /** URL */
     val url: String? = null,
+
+    // --- YouTube用 ---
+    /** YouTube動画ID(11文字。各種URL形式から抽出済み) */
+    val youtubeId: String? = null,
+    /** true: durationSecondsを無視し動画終了(ENDED)まで再生してから次へ進む */
+    val playToEnd: Boolean = false,
 
     // --- 元データ参照 ---
     /** 元のPlaylistItem（PdfJsInterfaceコールバック等で使用） */
@@ -117,6 +123,22 @@ data class FlatScreen(
                 firstPageOnly = isFirstPageOnly,
                 isPortrait = subItem.isPortrait,
                 item = subItem,
+                mainPlaylistIndex = mainIndex,
+            )
+        }
+
+        /** YouTubeコンテンツからFlatScreenを作成 */
+        fun fromYoutube(item: PlaylistItem, videoId: String, mainIndex: Int): FlatScreen {
+            return FlatScreen(
+                type = "youtube",
+                displayName = item.name,
+                displayTitle = formatTitle(item.name),
+                durationSeconds = item.durationSeconds,
+                url = item.url,
+                youtubeId = videoId,
+                // duration_seconds<=0 は「動画の最後まで再生してから次へ」(サーバー契約)
+                playToEnd = item.durationSeconds <= 0,
+                item = item,
                 mainPlaylistIndex = mainIndex,
             )
         }

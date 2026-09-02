@@ -643,6 +643,7 @@ class PlayerActivity : ComponentActivity() {
 
     private fun doPreviousSwap() {
         if (flatScreens.isEmpty()) return
+        val oldScreen = flatScreens.getOrNull(currentScreenIndex)
         currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
         val screen = flatScreens[currentScreenIndex]
 
@@ -653,6 +654,10 @@ class PlayerActivity : ComponentActivity() {
         activeWebView = oldPrev
         nextWebView = oldActive
         prevWebView = oldNext
+
+        // YouTube: 旧activeが再生中なら停止(裏で音が鳴るのを防止)、新activeがyoutubeなら再生開始
+        if (oldScreen?.type == "youtube") ytStop(oldActive)
+        if (screen.type == "youtube") ytPlay(activeWebView)
 
         // Crossfade
         activeWebView?.apply {
@@ -1144,6 +1149,7 @@ class PlayerActivity : ComponentActivity() {
                 userAgentString = settings.userAgentString.replace(
                     Regex("\\bwv\\b"), ""
                 ) + " Chrome/120.0.0.0"
+                mediaPlaybackRequiresUserGesture = false  // YouTube等の自動再生を許可(v1.82)
             }
             setInitialScale(100)
             isFocusable = false
@@ -1240,6 +1246,14 @@ class PlayerActivity : ComponentActivity() {
                 "pdf" -> {
                     val sourceFile = pdfCacheManager.getCachedPdfPath(item.contentId)
                     screens.add(FlatScreen.fromPdf(item, sourceFile, mainIdx))
+                }
+                "youtube" -> {
+                    val vid = extractYoutubeId(item.url ?: "")
+                    if (vid == null) {
+                        addDebugLog("[YT] URL解析失敗: ${item.name} url=${item.url} → スキップ")
+                    } else {
+                        screens.add(FlatScreen.fromYoutube(item, vid, mainIdx))
+                    }
                 }
                 "pdf_folder" -> {
                     // SMBキャッシュからサブプレイリストを構築
@@ -1545,6 +1559,50 @@ class PlayerActivity : ComponentActivity() {
         )
     }
 
+    // =========================================================================
+    // YouTube playback (v1.82)
+    // assets/pdf-viewer.html + PdfJsInterface と同じ「AndroidがJSを駆動する」方式。
+    // 先読み時はautoplay=falseでロードのみ行い(裏で音が鳴るのを防止)、
+    // アクティブ昇格時にytPlay()を呼んで再生開始する。
+    // =========================================================================
+
+    /** YouTube: 既定でミュート再生（サイネージ用途。音声不要かつ自動再生が確実） */
+    private val YOUTUBE_MUTED = true
+    /** YouTube: duration_seconds<=0 のとき動画の最後まで再生して次へ進む */
+    private val YOUTUBE_ADVANCE_ON_END = true
+    /** YouTube: 最後まで再生モードの安全弁(秒)。onYoutubeEnded()が来なくてもこれを超えたら強制的に次へ */
+    private val YOUTUBE_MAX_DURATION_SEC = 3600
+
+    /**
+     * 各種YouTube URL形式から動画ID(11文字)を抽出。取れなければnull。
+     * 対応: watch?v=ID / youtu.be/ID / embed/ID / shorts/ID / 生の11文字ID
+     */
+    private fun extractYoutubeId(url: String): String? {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return null
+        if (Regex("^[A-Za-z0-9_-]{11}$").matches(trimmed)) return trimmed
+        val patterns = listOf(
+            Regex("""[?&]v=([A-Za-z0-9_-]{11})"""),
+            Regex("""youtu\.be/([A-Za-z0-9_-]{11})"""),
+            Regex("""/embed/([A-Za-z0-9_-]{11})"""),
+            Regex("""/shorts/([A-Za-z0-9_-]{11})"""),
+        )
+        for (p in patterns) {
+            p.find(trimmed)?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    /** アクティブ昇格したYouTube WebViewの再生を開始する */
+    private fun ytPlay(view: WebView?) {
+        view?.evaluateJavascript("if(window.ytPlay)ytPlay();", null)
+    }
+
+    /** 非アクティブに降格したYouTube WebViewの再生を停止する（裏で音が鳴るのを防止） */
+    private fun ytStop(view: WebView?) {
+        view?.evaluateJavascript("if(window.ytStop)ytStop();", null)
+    }
+
     /** スクリーンをWebViewにロードする */
     private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
@@ -1572,7 +1630,32 @@ class PlayerActivity : ComponentActivity() {
             "dual_pdf" -> {
                 loadScreenDualPdf(webView, screen, preloadType = null)
             }
+            "youtube" -> {
+                loadScreenYoutube(webView, screen, preloadType = null)
+            }
         }
+    }
+
+    /** YouTube画面のロード（アクティブ=autoplay、先読み=無音ロードのみ） */
+    private fun loadScreenYoutube(webView: WebView, screen: FlatScreen, preloadType: String?) {
+        val autoplay = preloadType == null
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (url?.contains("youtube-player.html") == true) {
+                    view?.evaluateJavascript(
+                        "ytLoad('${screen.youtubeId}', $YOUTUBE_MUTED, $autoplay);", null
+                    )
+                }
+            }
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val crashed = detail?.didCrash() == true
+                addDebugLog("[WEBVIEW] Render process gone in youtube view (crashed=$crashed)")
+                handleWebViewCrash(view)
+                return true
+            }
+        }
+        webView.loadUrl("file:///android_asset/youtube-player.html")
     }
 
     /** PDF画面のロード（キャッシュチェック付き） */
@@ -1705,6 +1788,13 @@ class PlayerActivity : ComponentActivity() {
                 addDebugLog("[PDF] 安全弁タイマー発火")
                 advanceToNext()
             }.also { handler.postDelayed(it, safetyDuration) }
+        } else if (screen.type == "youtube" && screen.playToEnd) {
+            // 最後まで再生モード: 進行はonYoutubeEnded()が担当。ここでは安全弁タイマーのみ。
+            val safetyDuration = (YOUTUBE_MAX_DURATION_SEC * 1000).toLong()
+            contentTimer = Runnable {
+                addDebugLog("[YT] 安全弁タイマー発火(${YOUTUBE_MAX_DURATION_SEC}秒) → 次のコンテンツへ")
+                advanceToNext()
+            }.also { handler.postDelayed(it, safetyDuration) }
         } else {
             val duration = (screen.durationSeconds * 1000).toLong()
             contentTimer = Runnable { advanceToNext() }
@@ -1746,6 +1836,8 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
+        val oldScreen = flatScreens.getOrNull(currentScreenIndex)
+
         // インデックス進める
         currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
         val screen = flatScreens[currentScreenIndex]
@@ -1757,6 +1849,10 @@ class PlayerActivity : ComponentActivity() {
         activeWebView = oldNext
         prevWebView = oldActive
         nextWebView = oldPrev
+
+        // YouTube: 旧activeが再生中なら停止(裏で音が鳴るのを防止)、新activeがyoutubeなら再生開始
+        if (oldScreen?.type == "youtube") ytStop(oldActive)
+        if (screen.type == "youtube") ytPlay(activeWebView)
 
         // Crossfade
         activeWebView?.apply {
@@ -1823,6 +1919,10 @@ class PlayerActivity : ComponentActivity() {
             }
             "dual_pdf" -> {
                 loadScreenDualPdf(webView, screen, preloadType)
+            }
+            "youtube" -> {
+                loadScreenYoutube(webView, screen, preloadType)
+                // markPreloadReadyはonYoutubeReady()から呼ばれる(準備完了を待つ)
             }
         }
     }
@@ -2162,6 +2262,19 @@ class PlayerActivity : ComponentActivity() {
     // Lifecycle
     // =========================================================================
 
+    override fun onPause() {
+        super.onPause()
+        // アプリがバックグラウンドに回ったとき、YouTube動画の音が鳴り続けないよう停止
+        ytStop(activeWebView)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (flatScreens.getOrNull(currentScreenIndex)?.type == "youtube") {
+            ytPlay(activeWebView)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(updateLogReceiver) } catch (_: Exception) {}
@@ -2295,6 +2408,49 @@ class PlayerActivity : ComponentActivity() {
                 contentTimer?.let { handler.removeCallbacks(it) }
                 countdownTimer?.let { handler.removeCallbacks(it) }
                 pdfPageTimer?.let { handler.removeCallbacks(it) }
+                advanceToNext()
+            }
+        }
+
+        /** YouTube: プレイヤー準備完了通知。先読みWebViewなら nextReady/prevReady を立てる */
+        @JavascriptInterface
+        fun onYoutubeReady() {
+            handler.post {
+                if (webView != activeWebView && !nextReady) {
+                    nextReady = true
+                    addDebugLog("[YT] 先読み準備完了(next)")
+                    return@post
+                }
+                if (webView != activeWebView && !prevReady) {
+                    prevReady = true
+                    addDebugLog("[YT] 先読み準備完了(prev)")
+                    return@post
+                }
+                // activeWebViewの場合は既にloadScreen()で再生開始指示済みのため何もしない
+            }
+        }
+
+        /** YouTube: 再生終了通知。playToEndモードのときのみ次のコンテンツへ進む */
+        @JavascriptInterface
+        fun onYoutubeEnded() {
+            handler.post {
+                if (webView != activeWebView) return@post
+                val screen = flatScreens.getOrNull(currentScreenIndex)
+                if (screen?.type == "youtube" && screen.playToEnd) {
+                    addDebugLog("[YT] 再生終了 → 次のコンテンツへ")
+                    contentTimer?.let { handler.removeCallbacks(it) }
+                    advanceToNext()
+                }
+            }
+        }
+
+        /** YouTube: エラー通知（削除済み・埋め込み禁止・読込失敗等）。固まらず次のコンテンツへ */
+        @JavascriptInterface
+        fun onYoutubeError(code: Int) {
+            handler.post {
+                if (webView != activeWebView) return@post
+                addDebugLog("[YT] エラー(code=$code) → 次のコンテンツへ")
+                contentTimer?.let { handler.removeCallbacks(it) }
                 advanceToNext()
             }
         }

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<!--
+  YouTube動画再生用ラッパー (v1.82)
+  YouTube IFrame Player API を使い、AndroidPlayerActivity(SignageInterface)から
+  ytLoad()/ytPlay()/ytStop() で制御される。
+
+  設計方針:
+  - 先読み時は autoplay=false でロードのみ行い、再生はしない
+    (3枚WebViewローテーションの非表示WebViewで裏再生され音が鳴るのを防止)
+  - アクティブ昇格時にAndroid側からytPlay()が呼ばれて初めて再生開始
+  - onStateChange(ENDED) / onError はSignageInterfaceへ通知し、Android側で次画面へ進む判断をする
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000000;
+      overflow: hidden;
+    }
+    #player-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    #yt-player {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="player-container">
+    <div id="yt-player"></div>
+  </div>
+
+  <script>
+    var player = null;
+    var pendingLoad = null;   // ytLoad()がAPI準備前に呼ばれた場合の保留パラメータ
+    var apiReady = false;
+    var apiFailTimer = null;
+    var currentMuted = true;
+
+    function notify(fn) {
+      try {
+        if (window.SignageInterface && typeof window.SignageInterface[fn] === 'function') {
+          return function() {
+            window.SignageInterface[fn].apply(window.SignageInterface, arguments);
+          };
+        }
+      } catch (e) { /* WebView外(ブラウザ確認等)では何もしない */ }
+      return function() {};
+    }
+
+    // IFrame API のロードに失敗した場合(プロキシ遮断・オフライン等)、
+    // 一定時間onYoutubeReadyが来なければエラー通知して再生が固まらないようにする。
+    apiFailTimer = setTimeout(function() {
+      if (!apiReady) {
+        notify('onYoutubeError')(-1);
+      }
+    }, 10000);
+
+    // YouTube IFrame API本体を読み込み
+    var tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+    // グローバルコールバック(YouTube IFrame APIの規約)
+    window.onYouTubeIframeAPIReady = function() {
+      apiReady = true;
+      if (apiFailTimer) { clearTimeout(apiFailTimer); apiFailTimer = null; }
+      if (pendingLoad) {
+        var p = pendingLoad;
+        pendingLoad = null;
+        doLoad(p.videoId, p.muted, p.autoplay);
+      }
+    };
+
+    function doLoad(videoId, muted, autoplay) {
+      currentMuted = muted;
+      if (player) {
+        try { player.destroy(); } catch (e) {}
+        player = null;
+      }
+      player = new YT.Player('yt-player', {
+        videoId: videoId,
+        playerVars: {
+          controls: 0,
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          iv_load_policy: 3,
+          fs: 0,
+          disablekb: 1,
+          autoplay: autoplay ? 1 : 0
+        },
+        events: {
+          onReady: function(event) {
+            if (currentMuted) {
+              try { event.target.mute(); } catch (e) {}
+            }
+            if (autoplay) {
+              try { event.target.playVideo(); } catch (e) {}
+            }
+            notify('onYoutubeReady')();
+          },
+          onStateChange: function(event) {
+            // YT.PlayerState.ENDED === 0
+            if (event.data === 0) {
+              notify('onYoutubeEnded')();
+            }
+          },
+          onError: function(event) {
+            notify('onYoutubeError')(event.data);
+          }
+        }
+      });
+    }
+
+    /**
+     * 動画をロードする。videoId=YouTube動画ID(11文字)、muted=ミュート再生するか、
+     * autoplay=true ならロード後すぐ再生開始(アクティブ画面用)、
+     * false ならロードのみで再生しない(先読み用。準備完了はonYoutubeReadyで通知)。
+     */
+    window.ytLoad = function(videoId, muted, autoplay) {
+      if (!apiReady) {
+        pendingLoad = { videoId: videoId, muted: muted, autoplay: autoplay };
+        return;
+      }
+      doLoad(videoId, muted, autoplay);
+    };
+
+    /** アクティブ昇格時にAndroidから呼ばれ、再生を開始する */
+    window.ytPlay = function() {
+      if (player && typeof player.playVideo === 'function') {
+        try { player.playVideo(); } catch (e) {}
+      }
+    };
+
+    /** 非アクティブ降格時にAndroidから呼ばれ、再生を停止する(裏で音が鳴るのを防止) */
+    window.ytStop = function() {
+      if (player && typeof player.pauseVideo === 'function') {
+        try { player.pauseVideo(); } catch (e) {}
+      }
+    };
+  </script>
+</body>
+</html>
