@@ -20,6 +20,9 @@ class ConfigManager(context: Context) {
         private const val KEY_LAST_UPDATE_CHANNEL = "last_update_channel"
         private const val KEY_UPDATE_ATTEMPT_VERSION_CODE = "update_attempt_version_code"
         private const val KEY_UPDATE_ATTEMPT_COUNT = "update_attempt_count"
+        private const val KEY_LAST_CRASH_INFO = "last_crash_info"
+        private const val KEY_LAST_CRASH_TIME = "last_crash_time"
+        private const val KEY_CRASH_COUNT = "crash_count"
     }
 
     fun isConfigured(): Boolean {
@@ -102,5 +105,39 @@ class ConfigManager(context: Context) {
             .remove(KEY_UPDATE_ATTEMPT_VERSION_CODE)
             .remove(KEY_UPDATE_ATTEMPT_COUNT)
             .apply()
+    }
+
+    // ── 未捕捉例外のクラッシュ記録/自動復帰(v1.88) ──
+
+    /**
+     * クラッシュ情報を記録し、連続回数を返す。
+     * 前回クラッシュから60秒以内なら連続とみなしカウントを増やし、
+     * 60秒超なら1にリセットする(暴走ループ検知用)。
+     * プロセスをこの直後に殺すため apply() ではなく commit() で同期書き込みする。
+     */
+    fun recordCrash(info: String): Int {
+        val now = System.currentTimeMillis()
+        val lastTime = prefs.getLong(KEY_LAST_CRASH_TIME, 0L)
+        val prevCount = prefs.getInt(KEY_CRASH_COUNT, 0)
+        val newCount = if (lastTime > 0 && now - lastTime <= 60_000L) prevCount + 1 else 1
+        prefs.edit()
+            .putString(KEY_LAST_CRASH_INFO, info)
+            .putLong(KEY_LAST_CRASH_TIME, now)
+            .putInt(KEY_CRASH_COUNT, newCount)
+            .commit()
+        return newCount
+    }
+
+    /** Pair(クラッシュ情報, 発生時刻ms). 未記録の場合は Pair(null, 0) */
+    fun getLastCrash(): Pair<String?, Long> {
+        val info = prefs.getString(KEY_LAST_CRASH_INFO, null)
+        val time = prefs.getLong(KEY_LAST_CRASH_TIME, 0L)
+        return Pair(info, time)
+    }
+
+    fun getCrashCount(): Int = prefs.getInt(KEY_CRASH_COUNT, 0)
+
+    fun resetCrashCount() {
+        prefs.edit().putInt(KEY_CRASH_COUNT, 0).apply()
     }
 }

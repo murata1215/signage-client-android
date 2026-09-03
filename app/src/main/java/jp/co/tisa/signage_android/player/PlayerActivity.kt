@@ -1,6 +1,8 @@
 package jp.co.tisa.signage_android.player
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -204,6 +206,9 @@ class PlayerActivity : ComponentActivity() {
         // Initialize managers
         configManager = ConfigManager(this)
 
+        // 未捕捉例外のクラッシュ記録+自動復帰(v1.88)。他の初期化より前に設置する
+        installCrashHandler()
+
         // Register broadcast receivers
         val updateLogFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_UPDATE_LOG)
         val scheduleFilter = IntentFilter(jp.co.tisa.signage_android.service.SignageService.ACTION_SCHEDULE_UPDATED)
@@ -264,6 +269,41 @@ class PlayerActivity : ComponentActivity() {
                 statusBar.text = "エラー: ${e.message}"
                 e.printStackTrace()
             }
+        }
+    }
+
+    /**
+     * 未捕捉例外(UIスレッドの例外含む)を検知してクラッシュ情報を記録し、
+     * AlarmManagerで再起動を予約してからプロセスを終了する(v1.88)。
+     * 一度落ちたら端末再起動まで止まったままだった問題への対処。
+     * 60秒以内に連続でクラッシュした場合は再起動間隔を延ばし暴走ループを防ぐ。
+     */
+    private fun installCrashHandler() {
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            try {
+                val frame = e.stackTrace.firstOrNull { it.className.startsWith("jp.co.tisa") }
+                    ?: e.stackTrace.firstOrNull()
+                val location = frame?.let { "${it.fileName}:${it.lineNumber}" } ?: "unknown"
+                val info = "${e.javaClass.simpleName}: ${e.message} @ $location"
+                val count = configManager.recordCrash(info)
+
+                // 連続クラッシュ(60秒以内)が5回以上に達したら再起動間隔を延ばす(暴走ループ防止)
+                val delayMs = if (count >= 5) 5 * 60_000L else 2_000L
+
+                val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                val restartIntent = Intent(this, jp.co.tisa.signage_android.MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                }
+                val pendingIntent = PendingIntent.getActivity(
+                    this, 0, restartIntent, PendingIntent.FLAG_IMMUTABLE
+                )
+                // SCHEDULE_EXACT_ALARM権限が不要な非正確アラームで十分(数秒〜数分の遅延は許容)
+                alarmManager.set(AlarmManager.RTC, System.currentTimeMillis() + delayMs, pendingIntent)
+            } catch (_: Exception) {
+                // クラッシュハンドラ自体が失敗しても、以降のkillProcessだけは必ず実行する
+            }
+            android.os.Process.killProcess(android.os.Process.myPid())
+            kotlin.system.exitProcess(10)
         }
     }
 
@@ -404,6 +444,15 @@ class PlayerActivity : ComponentActivity() {
         val (attemptCode, attemptCount) = configManager.getUpdateAttempt()
         if (attemptCode >= 0 && attemptCount >= jp.co.tisa.signage_android.service.AppUpdateManager.MAX_INSTALL_ATTEMPTS) {
             sb.append("更新スキップ中: v$attemptCode (${attemptCount}回失敗)\n")
+        }
+
+        // ── 直近クラッシュ(v1.88): 未記録なら非表示 ──
+        val (crashInfo, crashTime) = configManager.getLastCrash()
+        if (crashInfo != null && crashTime > 0) {
+            val crashTimeStr = java.text.SimpleDateFormat("MM/dd HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date(crashTime))
+            sb.append("直近クラッシュ: $crashTimeStr ${crashInfo.take(60)}\n")
+            sb.append("                (連続${configManager.getCrashCount()}回)\n")
         }
 
         val dm = resources.displayMetrics
@@ -877,7 +926,7 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** 選択行を常に中央に置く7行窓（上3 / 選択 / 下3）を循環描画 */
+    /** 選択行を常に中央に置く7行窓（上3 / 選択 / 下3）を循環描画。画面数が7以下なら全件を1回ずつ表示 */
     private fun renderScreenList() {
         val size = flatScreens.size
         if (size == 0) return
@@ -887,11 +936,19 @@ class PlayerActivity : ComponentActivity() {
         sb.append("${selectedListIndex + 1} / $size\n")
         sb.append("─".repeat(22)).append("\n")
 
-        val span = 3  // 上下に表示する行数
-        for (offset in -span..span) {
-            val idx = (selectedListIndex + offset + size) % size
+        val span = 3                        // 選択行の上下に表示する行数
+        val windowRows = span * 2 + 1       // 窓の最大行数(7)
+        // size <= windowRows のときは循環せず全件を1回ずつ（同じ画面が重複表示されるのを防ぐ）。
+        // size > windowRows のときのみ7行窓を循環させる。floorModで負インデックスを防止(v1.88)。
+        val indices = if (size <= windowRows) {
+            (0 until size).toList()
+        } else {
+            (-span..span).map { Math.floorMod(selectedListIndex + it, size) }
+        }
+
+        for (idx in indices) {
             val screen = flatScreens[idx]
-            val cursor = if (offset == 0) "▶ " else "   "
+            val cursor = if (idx == selectedListIndex) "▶ " else "   "
             val playing = if (idx == currentScreenIndex) "●" else " "
             sb.append("$cursor$playing ${idx + 1}. ${screen.displayTitle}\n")
         }
@@ -1315,6 +1372,7 @@ class PlayerActivity : ComponentActivity() {
         }
 
         addDebugLog("[PLAY] 再生開始")
+        configManager.resetCrashCount()  // 再生に到達 = 正常復帰とみなす(v1.88)
         displayCurrentScreen()
         startSmbFolderSync()
     }

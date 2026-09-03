@@ -36,3 +36,26 @@
   - リリース: versionCode 87 / versionName "1.87"
   - 対処（コード変更なし）: 共有フォルダ側でファイル名の終了日をリネームで延長すれば即座に表示再開（反映は最大3分、
     即時なら端末再起動）
+
+## 画面一覧オーバーレイのクラッシュ修正 + 未捕捉例外の自動復帰 (v1.88)
+
+- [x] **実装完了・ビルド成功（2026-09-03）**
+  - 症状: 投影コンテンツが1件・2件の場合、リモコンの「↓」を押しているとアプリが落ちる
+  - 原因: `PlayerActivity.renderScreenList()` の7行窓インデックス計算 `(selectedListIndex + offset + size) % size`
+    (offset=-3..3) がKotlinの `%`(floorModではなく剰余)により負値になり、`flatScreens[-1]` で
+    `ArrayIndexOutOfBoundsException`。`size==2`かつ`selectedListIndex==0`のとき`(0-3+2)=-1`→`-1%2=-1`で確実に発生。
+    他の剰余箇所(L695/720/758/835/2061/2099/2107/2468/2473)は全て`-1+size`止まりで安全、欠陥はここ1箇所のみ
+  - `PlayerActivity.kt`: `renderScreenList()`を`Math.floorMod`化 + 画面数が7(窓の最大行数)以下のときは
+    循環させず全件を1回ずつ表示するよう修正(クラッシュ回避 + 「2画面なのに同じ2件が7行並ぶ」表示も解消)。
+    カーソル判定を`offset==0`から`idx==selectedListIndex`に変更
+  - あわせて、アプリに未捕捉例外ハンドラが無く一度落ちると端末再起動まで止まったままだった問題に対処:
+    `onCreate()`冒頭で`installCrashHandler()`により`Thread.setDefaultUncaughtExceptionHandler`を設置。
+    例外情報を`ConfigManager.recordCrash()`で記録(`commit()`で同期書き込み)、`AlarmManager.set(RTC,...)`で
+    `MainActivity`への復帰を予約してから`Process.killProcess()`。非正確アラームのため`SCHEDULE_EXACT_ALARM`
+    権限不要・`AndroidManifest.xml`無改修。60秒以内の連続クラッシュが5回に達したら再起動間隔を2秒→5分に延長
+    (暴走ループ防止)。`startPlayback()`が「[PLAY] 再生開始」に到達した時点で`resetCrashCount()`(成功検知)
+  - `ConfigManager.kt`: `recordCrash()`/`getLastCrash()`/`getCrashCount()`/`resetCrashCount()`追加
+  - デバッグオーバーレイ3ページ目に「直近クラッシュ: MM/dd HH:mm:ss ExceptionClass: message @ File:line (連続N回)」
+    を追加(未記録時は行ごと非表示)
+  - リリース: versionCode 88 / versionName "1.88"
+  - `AndroidManifest.xml` / `SmbPdfManager.kt` / `SignageService.kt` / `ServerClient.kt` は無改修
