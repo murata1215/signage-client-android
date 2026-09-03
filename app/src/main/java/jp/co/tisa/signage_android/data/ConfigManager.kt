@@ -17,6 +17,9 @@ class ConfigManager(context: Context) {
         private const val KEY_POLLING_INTERVAL = "polling_interval_sec"
         private const val KEY_CACHED_SCHEDULE = "cached_schedule"
         private const val KEY_CACHED_VERSION = "cached_version"
+        private const val KEY_LAST_UPDATE_CHANNEL = "last_update_channel"
+        private const val KEY_UPDATE_ATTEMPT_VERSION_CODE = "update_attempt_version_code"
+        private const val KEY_UPDATE_ATTEMPT_COUNT = "update_attempt_count"
     }
 
     fun isConfigured(): Boolean {
@@ -67,5 +70,37 @@ class ConfigManager(context: Context) {
 
     fun clearAll() {
         prefs.edit().clear().apply()
+    }
+
+    // ── APK更新チャネル/ループ防御(v1.86) ──
+
+    fun saveLastUpdateChannel(channel: String?) {
+        prefs.edit().putString(KEY_LAST_UPDATE_CHANNEL, channel).apply()
+    }
+
+    fun getLastUpdateChannel(): String? = prefs.getString(KEY_LAST_UPDATE_CHANNEL, null)
+
+    /** Pair(attemptVersionCode, attemptCount). 未記録の場合は Pair(-1, 0) */
+    fun getUpdateAttempt(): Pair<Int, Int> {
+        val code = prefs.getInt(KEY_UPDATE_ATTEMPT_VERSION_CODE, -1)
+        val count = prefs.getInt(KEY_UPDATE_ATTEMPT_COUNT, 0)
+        return Pair(code, count)
+    }
+
+    /** 対象の version_code への試行を1回記録する。version_code が変わればカウントは1にリセット */
+    fun recordUpdateAttempt(versionCode: Int) {
+        val (prevCode, prevCount) = getUpdateAttempt()
+        val newCount = if (prevCode == versionCode) prevCount + 1 else 1
+        prefs.edit()
+            .putInt(KEY_UPDATE_ATTEMPT_VERSION_CODE, versionCode)
+            .putInt(KEY_UPDATE_ATTEMPT_COUNT, newCount)
+            .apply()
+    }
+
+    fun resetUpdateAttempt() {
+        prefs.edit()
+            .remove(KEY_UPDATE_ATTEMPT_VERSION_CODE)
+            .remove(KEY_UPDATE_ATTEMPT_COUNT)
+            .apply()
     }
 }

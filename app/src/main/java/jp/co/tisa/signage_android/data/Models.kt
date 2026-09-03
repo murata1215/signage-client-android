@@ -49,5 +49,6 @@ data class UpdateInfo(
     @SerializedName("version_code") val versionCode: Int,
     @SerializedName("version_name") val versionName: String,
     @SerializedName("url") val url: String,
-    @SerializedName("force") val force: Boolean = false
+    @SerializedName("force") val force: Boolean = false,
+    @SerializedName("channel") val channel: String? = null
 )

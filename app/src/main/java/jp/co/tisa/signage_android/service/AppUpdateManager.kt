@@ -7,6 +7,7 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import jp.co.tisa.signage_android.data.ConfigManager
 import jp.co.tisa.signage_android.data.ServerClient
 import java.io.File
 import java.io.FileInputStream
@@ -20,7 +21,11 @@ class AppUpdateManager(
         private const val TAG = "AppUpdateManager"
         private const val APK_FILENAME = "signage-update.apk"
         const val ACTION_INSTALL_RESULT = "jp.co.tisa.signage_android.INSTALL_RESULT"
+        /** 同一version_codeへの更新をこの回数試行しても currentVersion が上がらなければ以後スキップ(無限DL+インストーラー起動ループ防止) */
+        const val MAX_INSTALL_ATTEMPTS = 3
     }
+
+    private val configManager = ConfigManager(context)
 
     private val apkDir: File = File(context.filesDir, "updates").apply {
         if (!exists()) mkdirs()
@@ -60,16 +65,38 @@ class AppUpdateManager(
             return false
         }
 
+        configManager.saveLastUpdateChannel(updateInfo.channel)
+
         val currentVersion = getCurrentVersionCode()
-        onLog("現在v$currentVersion → サーバーv${updateInfo.versionCode} (${updateInfo.versionName})")
+
+        // 成功検知: 前回試行していたversionCode以上に既に上がっていればカウンタをリセット
+        val (attemptCode, attemptCount) = configManager.getUpdateAttempt()
+        if (attemptCode >= 0 && currentVersion >= attemptCode) {
+            configManager.resetUpdateAttempt()
+        }
+
+        val channelSuffix = updateInfo.channel?.let { " [$it]" } ?: ""
+        onLog("現在v$currentVersion → サーバーv${updateInfo.versionCode} (${updateInfo.versionName})$channelSuffix")
 
         if (updateInfo.versionCode <= currentVersion) {
             onLog("最新版です")
+            configManager.resetUpdateAttempt()
             cleanupApk()
             return false
         }
 
-        onLog("更新あり! DL: ${updateInfo.url.takeLast(40)}")
+        // 更新ループ防御: 同一version_codeで既定回数失敗していたらスキップ
+        val (curAttemptCode, curAttemptCount) = configManager.getUpdateAttempt()
+        if (curAttemptCode == updateInfo.versionCode && curAttemptCount >= MAX_INSTALL_ATTEMPTS) {
+            onLog("更新に${MAX_INSTALL_ATTEMPTS}回失敗したため v${updateInfo.versionCode} をスキップします(サーバー側の不整合の可能性)")
+            return false
+        }
+
+        // インストール実行で自プロセスが停止しうるため、試行回数はDL/インストールの前に記録する
+        configManager.recordUpdateAttempt(updateInfo.versionCode)
+        val (_, newAttemptCount) = configManager.getUpdateAttempt()
+
+        onLog("更新あり! (${newAttemptCount}/${MAX_INSTALL_ATTEMPTS}回目) DL: ${updateInfo.url.takeLast(40)}")
 
         val success = serverClient.downloadApk(updateInfo.url, apkFile)
         if (!success || !apkFile.exists()) {

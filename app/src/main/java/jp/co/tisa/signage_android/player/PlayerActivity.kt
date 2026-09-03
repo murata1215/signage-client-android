@@ -371,6 +371,11 @@ class PlayerActivity : ComponentActivity() {
         val key = config?.clientKey ?: "未設定"
         val keyDisplay = if (key.length > 16) key.take(16) + "..." else key
         sb.append("クライアントキー: $keyDisplay\n")
+        sb.append("更新チャネル: ${configManager.getLastUpdateChannel() ?: "未取得"}\n")
+        val (attemptCode, attemptCount) = configManager.getUpdateAttempt()
+        if (attemptCode >= 0 && attemptCount >= jp.co.tisa.signage_android.service.AppUpdateManager.MAX_INSTALL_ATTEMPTS) {
+            sb.append("更新スキップ中: v$attemptCode (${attemptCount}回失敗)\n")
+        }
 
         val dm = resources.displayMetrics
         sb.append("画面: ${dm.widthPixels}x${dm.heightPixels} (dpr: ${dm.density})\n")
