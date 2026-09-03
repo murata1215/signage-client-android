@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.89 (2026-09-04)
+- YouTube再生不能(エラー152-4)の原因特定用の計測を追加 + 有力な対処を投入。v1.83〜v1.85で潰した仮説(origin/153対策・UA単一トークン化・直接embedフォールバック)は全てシロと判明(直接embedでも152-4が再現するため)。WebViewベースのYouTube再生で同様の152が「広告ステータス問い合わせ(static.doubleclick.net/instream/ad_status.js)がプロキシ等でERR_CONNECTION_REFUSEDになり再生自体が拒否される」事例と一致することが有力な仮説
+- 【計測】YouTube用WebViewClientに`onReceivedError`/`onReceivedHttpError`を追加し、サブリソース含む全リクエストの失敗を`[YT-NET] host/path err=... main=...`としてログ出力(ホスト+詳細単位で重複除去、最大8件)。ワーカースレッドから呼ばれるため`handler.post()`経由でMainスレッドに渡す
+- 【計測】疎通プローブ(`ServerClient.probeYoutubeConnectivity()`)に`static.doubleclick.net`/`googleads.g.doubleclick.net`/`jnn-pa.googleapis.com`/`play.google.com`を追加(9項目化)。デバッグオーバーレイ3ページ目の`YT疎通:`表示を4項目ごとに改行
+- 【計測】YouTube画面に初めて到達したタイミングで疎通プローブを再実行(`rerunYoutubeProbeIfNeeded()`)。起動直後はネットワーク未確立の可能性があるため
+- 【対処B-1】埋め込みホストを`youtube-nocookie.com`に切替え(`YOUTUBE_USE_NOCOOKIE = true`)。広告関連リソースを読みに行かないプライバシー強化ドメインのため、doubleclick遮断があっても再生できる可能性がある。`youtubeEffectiveBaseUrl`経由でloadDataWithBaseURLのbaseUrl・IFrame APIのorigin/host・直接embedのembedUrlを一括連動(1フラグで従来動作に復帰可能)
+- 【対処B-2】`YT_AD_BLOCK_HOSTS`(doubleclick.net等4ホスト)宛のリクエストを`shouldInterceptRequest`で空のHTTP 200に差し替え、プロキシの接続拒否を「広告なし」として扱わせる(`YOUTUBE_STUB_AD_REQUESTS`フラグで無効化可能)
+- 【対処B-3】YouTube画面のUser-Agentを、v1.85のMobile UAからDesktop UAに変更。エラー152系は「モバイルChromeでは埋め込み再生できないのでアプリで見て」という意味のコードのため、Mobileトークンが逆効果の可能性を考慮(適用範囲は`type=="youtube"`のみ、web/PDF画面は無影響)
+- 【対処B-4】再生開始watchdogの猶予`PLAY_WATCHDOG_SEC`を12秒→20秒に延長。あわせてログを`stage1(wrapper)`/`stage2(直接embed)`の段階表記に統一し、どの段階まで進んだかをオーバーレイから判別しやすくした
+- `loadScreenYoutube()`/`fallbackToDirectEmbed()`の`WebViewClient`生成を`createYoutubeWebViewClient()`に共通化(ネットワーク診断・広告握り潰しの重複実装を回避)
+- リリース: versionCode 89 / versionName "1.89"
+- `AndroidManifest.xml` / `ConfigManager.kt` / `SmbPdfManager.kt` / `SignageService.kt` は無改修。サーバー側(signage-server-windows)の変更も不要
+
 ## v1.88 (2026-09-03)
 - 【重要】投影コンテンツが1〜2件のとき、リモコンの↓(画面一覧オーバーレイ)を押すと確実にアプリが落ちる不具合を修正
   - 原因: `renderScreenList()` の7行窓インデックス計算がKotlinの `%`(floorModではなく剰余)により負値になり、`flatScreens[-1]` で `ArrayIndexOutOfBoundsException`

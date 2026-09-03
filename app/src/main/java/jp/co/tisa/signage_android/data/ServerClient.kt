@@ -165,11 +165,13 @@ class ServerClient(private val config: SignageConfig) {
     }
 
     /**
-     * YouTube関連ドメインへの疎通プローブ(v1.85)。
+     * YouTube関連ドメインへの疎通プローブ(v1.85、v1.89でdoubleclick等の広告/認証系を追加)。
      * 152-4等のYouTube再生エラーが「プロキシがgooglevideo.com等の配信/認証系ドメインを
      * 塞いでいる」ことに起因していないかを実測で切り分けるための診断用メソッド。
      * 既存のプロキシ設定(getClient())をそのまま再利用する。
      * 戻り値はデバッグオーバーレイに1行で表示する簡易フォーマット。
+     * v1.89: 埋め込みプレイヤーが再生前に問い合わせる広告ステータス(static.doubleclick.net等)が
+     * プロキシで遮断されエラー152の原因になっている疑いがあるため、対象ドメインを追加した。
      */
     suspend fun probeYoutubeConnectivity(): String = withContext(Dispatchers.IO) {
         val targets = listOf(
@@ -177,7 +179,12 @@ class ServerClient(private val config: SignageConfig) {
             "google" to "https://www.google.com/generate_204",
             "ytimg" to "https://i.ytimg.com/favicon.ico",
             "gvideo" to "https://redirector.googlevideo.com/generate_204",
-            "ncookie" to "https://www.youtube-nocookie.com/favicon.ico"
+            "ncookie" to "https://www.youtube-nocookie.com/favicon.ico",
+            // v1.89: 埋め込みプレイヤーの広告ステータス問い合わせ/再生トークン発行系(152の主犯候補)
+            "dclick" to "https://static.doubleclick.net/instream/ad_status.js",
+            "gads" to "https://googleads.g.doubleclick.net/favicon.ico",
+            "jnnpa" to "https://jnn-pa.googleapis.com/favicon.ico",
+            "pglog" to "https://play.google.com/generate_204"
         )
         val results = targets.map { (label, url) ->
             val status = try {

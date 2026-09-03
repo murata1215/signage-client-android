@@ -19,12 +19,17 @@
   - このHTMLは file:///android_asset/ から直接loadUrl()せず、PlayerActivity側で
     loadDataWithBaseURL("https://www.youtube.com", ...) 経由で読み込むこと(v1.83)。
     file:// originのままIFrame APIを使うとorigin検証に失敗しエラー153になるため。
-  - 再生開始watchdog(v1.85): onReadyが来てYT.Playerが生成されても、YouTube側が
-    エラーコード152等をプレイヤー内部UIとして表示するだけでonErrorを発火させない
-    ケースがある。この場合、onReady後に再生状態をポーリングし、一定時間内に
-    再生が始まらなければ onYoutubeStalled() をAndroid側へ通知する。
+  - 再生開始watchdog(v1.85、v1.89でPLAY_WATCHDOG_SEC 12→20秒に延長): onReadyが来て
+    YT.Playerが生成されても、YouTube側がエラーコード152等をプレイヤー内部UIとして
+    表示するだけでonErrorを発火させないケースがある。この場合、onReady後に再生状態を
+    ポーリングし、一定時間内に再生が始まらなければ onYoutubeStalled() をAndroid側へ通知する。
     Android側はこれを受けて「loadDataWithBaseURL経由のラッパーHTML」を介さず
     YouTubeの/embed/ページへ直接loadUrl()するフォールバックに切り替える。
+  - origin/host(v1.89): CONFIG.origin(Android側のyoutubeEffectiveBaseUrl)をplayerVars.origin
+    とYT.Playerのhostオプション両方に使う。www.youtube.com / www.youtube-nocookie.com の
+    切替え(YOUTUBE_USE_NOCOOKIE)に自動追従させ、origin/host不一致によるエラー153を防ぐ。
+    youtube-nocookie.comへの切替えは、広告関連リソース(doubleclick.net等)への問い合わせを
+    行わないことでプロキシ遮断に起因するエラー152を回避できないかを試す対策。
 -->
 <html>
 <head>
@@ -63,10 +68,13 @@
 
   <script>
     // Android側(buildYoutubeHtml)がプレースホルダを実値に置換してから読み込む(v1.84)
+    // v1.89: __ORIGIN__ を追加。youtubeEffectiveBaseUrl(www.youtube.com / www.youtube-nocookie.com)と
+    // 常に一致させる必要がある(不一致はエラー153の原因になる)ため、baseUrlと同じ値をAndroid側から注入する。
     var CONFIG = {
       videoId: '__VIDEO_ID__',
       muted: __MUTED__,
-      autoplay: __AUTOPLAY__
+      autoplay: __AUTOPLAY__,
+      origin: '__ORIGIN__'
     };
 
     var player = null;
@@ -78,9 +86,11 @@
     var stalledNotified = false;
     var currentMuted = true;
 
-    // 再生開始watchdogの猶予秒数(v1.85): onReady後この秒数以内に再生状態(PLAYING)へ
-    // 遷移しなければ再生不能とみなしonYoutubeStalled()を通知する
-    var PLAY_WATCHDOG_SEC = 12;
+    // 再生開始watchdogの猶予秒数(v1.85、v1.89で12→20秒に延長): onReady後この秒数以内に
+    // 再生状態(PLAYING)へ遷移しなければ再生不能とみなしonYoutubeStalled()を通知する。
+    // プロキシ経由での初回バッファリングが12秒では短く、誤検知でstage2(直接embed)へ
+    // フォールバックしてしまっている可能性を考慮し延長した。
+    var PLAY_WATCHDOG_SEC = 20;
 
     function notify(fn) {
       try {
@@ -144,6 +154,10 @@
         notify('onYoutubeError')(-2);
       }, 15000);
       player = new YT.Player('yt-player', {
+        // host: IFrame本体(iframeのsrc)をどのドメインから読み込むかを指定するYT.Player公式オプション(v1.89)。
+        // CONFIG.origin(=Android側のyoutubeEffectiveBaseUrl)と連動させ、
+        // www.youtube.com / www.youtube-nocookie.com の切替えに追従させる。
+        host: CONFIG.origin,
         videoId: videoId,
         playerVars: {
           controls: 0,
@@ -156,8 +170,9 @@
           autoplay: autoplay ? 1 : 0,
           // enablejsapi=1相当(IFrame API使用時は暗黙的に有効)でorigin検証が行われるため、
           // このページの読み込み元(loadDataWithBaseURLで付与するbaseUrl)と一致させる。
-          // 不一致だとエラー153(invalid embed / referer未確認)になる(v1.83)
-          origin: 'https://www.youtube.com'
+          // 不一致だとエラー153(invalid embed / referer未確認)になる(v1.83)。
+          // v1.89: 固定値からCONFIG.origin参照に変更し、hostと必ず一致させる。
+          origin: CONFIG.origin
         },
         events: {
           onReady: function(event) {

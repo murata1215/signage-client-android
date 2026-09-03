@@ -26,6 +26,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
@@ -46,6 +49,7 @@ import jp.co.tisa.signage_android.data.ConfigManager
 import jp.co.tisa.signage_android.data.PlaylistItem
 import jp.co.tisa.signage_android.data.ServerClient
 import kotlinx.coroutines.*
+import java.io.ByteArrayInputStream
 import java.io.File
 import kotlin.math.abs
 
@@ -106,6 +110,12 @@ class PlayerActivity : ComponentActivity() {
     private var youtubeProbeResult: String = "未実施"
     /** WebView実装のパッケージ名・バージョン文字列(デバッグオーバーレイ表示用)(v1.85) */
     private var webViewImplInfo: String = "取得中"
+    /** YouTube画面に初めて到達した時に疎通プローブを再実行したか(v1.89、起動直後はネットワーク未確立のことがあるため) */
+    private var youtubeProbeRerunDone = false
+    /** YouTube画面のネットワークエラー(サブリソース含む)の重複排除用セット(host+detail単位)(v1.89) */
+    private val ytNetErrorHosts = LinkedHashSet<String>()
+    /** ytNetErrorHostsに記録する上限件数。ローリングログ(20行)が埋まるのを防ぐ(v1.89) */
+    private val YT_NET_LOG_MAX = 8
 
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -331,6 +341,22 @@ class PlayerActivity : ComponentActivity() {
         addDebugLog("[SMB] 期限外スキップ: ${skipped.size}件 ($names$more)")
     }
 
+    /**
+     * YouTube画面のネットワークエラー(サブリソース失敗含む)をログに出す(v1.89)。
+     * onReceivedError/onReceivedHttpError/shouldInterceptRequestはワーカースレッドから
+     * 呼ばれる可能性があるため、必ずhandler.post()でMainスレッド経由にする
+     * (addDebugLog()はdebugPage==1のときTextViewを直接触るため。v1.87と同じ制約)。
+     * host+詳細の組み合わせで重複除去し、最大YT_NET_LOG_MAX件までに絞ってログの氾濫を防ぐ。
+     */
+    private fun logYtNetError(detail: String) {
+        handler.post {
+            if (ytNetErrorHosts.size >= YT_NET_LOG_MAX && !ytNetErrorHosts.contains(detail)) return@post
+            if (ytNetErrorHosts.add(detail)) {
+                addDebugLog("[YT-NET] $detail")
+            }
+        }
+    }
+
     private fun cycleDebugPage() {
         debugPage = (debugPage + 1) % 5  // 0→1→2→3→4→0
         if (debugPage == 0) {
@@ -431,7 +457,12 @@ class PlayerActivity : ComponentActivity() {
         sb.append("WebView: $webViewImplInfo\n")
         val uaDisplay = defaultUserAgent.takeLast(70)
         sb.append("UA: ...$uaDisplay\n")
-        sb.append("YT疎通: $youtubeProbeResult\n")
+        // 疎通対象が9項目(v1.89でdoubleclick等4件追加)になり1行に収まらないため、4項目ごとに改行する
+        sb.append("YT疎通:\n")
+        val probeItems = youtubeProbeResult.split(" ").filter { it.isNotBlank() }
+        probeItems.chunked(4).forEach { chunk ->
+            sb.append("  ${chunk.joinToString(" ")}\n")
+        }
 
         // ── サーバー・画面 ──
         sb.append("${"─".repeat(20)}\n")
@@ -1729,28 +1760,66 @@ class PlayerActivity : ComponentActivity() {
     /** YouTube: 先読み中に onYoutubeReady() が来ない場合に強制readyにするまでの時間(ms)(v1.84) */
     private val YOUTUBE_PRELOAD_READY_TIMEOUT_MS = 15000L
 
-    /** YouTube IFrame Player APIのorigin検証用ベースURL(エラー153対策、v1.83) */
+    /**
+     * YouTube IFrame Player APIのorigin検証用ベースURL(エラー153対策、v1.83)。
+     * v1.89: v1.85のIFrame APIラッパー・直接embed双方で152-4が解消しなかったため、
+     * 広告関連リソース(doubleclick.net等)を読みに行かない youtube-nocookie.com への
+     * 切替えを試す(YOUTUBE_USE_NOCOOKIE)。この定数自体はnocookie=false時のフォールバック値
+     * として残す。
+     */
     private val YOUTUBE_PLAYER_BASE_URL = "https://www.youtube.com"
 
     /**
-     * YouTube画面専用のUser-Agent(v1.85)。
+     * YouTube: プライバシー強化ドメイン(youtube-nocookie.com)を使うか(v1.89)。
+     * 152-4対策の第一候補。falseに戻せば従来のwww.youtube.comに即座に戻る。
+     * loadDataWithBaseURLのbaseUrl・IFrame APIのorigin/host・直接embedフォールバックの
+     * embedUrlは全てyoutubeEffectiveBaseUrl経由で参照するため、ここ1箇所の切替えで連動する。
+     */
+    private val YOUTUBE_USE_NOCOOKIE = true
+
+    /** YOUTUBE_USE_NOCOOKIEに応じて実際に使うベースURL(v1.89) */
+    private val youtubeEffectiveBaseUrl: String
+        get() = if (YOUTUBE_USE_NOCOOKIE) "https://www.youtube-nocookie.com" else YOUTUBE_PLAYER_BASE_URL
+
+    /**
+     * YouTube画面専用のUser-Agent(v1.85→v1.89でDesktop UAに変更)。
      * createWebView()の既定UAは `settings.userAgentString.replace(Regex("wv"),"") + " Chrome/120.0.0.0"`
      * という式のため、Chrome/バージョン+Mobile Safari/バージョンの後ろにさらに
      * Chrome/120.0.0.0が連結され「Chrome/トークンが2個ある不正なUA」になってしまっている
-     * (先頭に出るのは端末実機の古いChromiumバージョン)。YouTubeはUAでブラウザ世代を
-     * 判定するため、これが再生拒否(152等)の一因になっている可能性がある。
-     * YouTube画面ではこの単一トークンの正規UAに一時的に差し替え、それ以外の画面
+     * (先頭に出るのは端末実機の古いChromiumバージョン)。v1.85ではこれを単一トークンの
+     * 正規Mobile UAに直しただけだったが、152-x は「モバイルChromeでは埋め込み再生できない
+     * のでYouTubeアプリで見て」という意味のエラーコードであるため、Mobile Safariトークンを
+     * 含むUA自体が拒否の一因になっている可能性がある。端末は1920x1080のSTBでモバイル用途では
+     * ないため、v1.89でDesktop UA(Mobileトークン無し)に変更する。
+     * YouTube画面ではこのUAに一時的に差し替え、それ以外の画面
      * (intramart等の自動フィット拡大が前提の既存Web画面)には一切影響させない。
      */
     private val YOUTUBE_USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/120.0.0.0 Safari/537.36"
 
     /** YouTube: 再生開始watchdogがstalledを検知した際、直接embedページで代替再生する際の表示秒数(v1.85) */
     private val YOUTUBE_FALLBACK_DURATION_SEC = 60
 
     /** YouTube: 直接embedフォールバック実施済みを示すWebView.tagの値(v1.85) */
     private val YT_FALLBACK_TAG = "yt_fallback"
+
+    /**
+     * YouTube画面で握り潰す広告/計測系ホスト(v1.89)。
+     * 企業プロキシがこれらのドメインを遮断していると、埋め込みプレイヤーが再生前に行う
+     * 広告ステータス問い合わせ(例: static.doubleclick.net/instream/ad_status.js)が
+     * ハードなネットワークエラーになり、YouTube側が再生そのものを拒否する(エラー152)
+     * ケースが確認されている。ここに列挙したホストへのリクエストはWebView側で
+     * 空のHTTP 200に差し替え、「広告なし」として扱わせることで再生拒否を回避する。
+     */
+    private val YT_AD_BLOCK_HOSTS = listOf(
+        "static.doubleclick.net",
+        "googleads.g.doubleclick.net",
+        "pagead2.googlesyndication.com",
+        "www.googletagservices.com"
+    )
+    /** YT_AD_BLOCK_HOSTSの握り潰しを有効にするか(v1.89)。効果が無ければfalseに戻すだけで無効化できる */
+    private val YOUTUBE_STUB_AD_REQUESTS = true
 
     /**
      * 画面種別に応じてUAを切り替える(v1.85)。
@@ -1850,12 +1919,104 @@ class PlayerActivity : ComponentActivity() {
      * loadDataWithBaseURL() のURL正規化でbaseUrlに末尾スラッシュが付与されるため
      * onPageFinished側のURL比較が常にfalseになり ytLoad() が一度も呼ばれないバグがあった。
      * HTMLに値を先に埋め込む方式にしてタイミング依存を根絶する。
+     * v1.89: __ORIGIN__ を追加し、IFrame APIのorigin/hostをyoutubeEffectiveBaseUrl(nocookie切替対応)
+     * と自動的に一致させる(不一致はエラー153の原因になるため)。
      */
     private fun buildYoutubeHtml(videoId: String, muted: Boolean, autoplay: Boolean): String {
         return loadYoutubePlayerHtmlTemplate()
             .replace("__VIDEO_ID__", videoId)
             .replace("__MUTED__", muted.toString())
             .replace("__AUTOPLAY__", autoplay.toString())
+            .replace("__ORIGIN__", youtubeEffectiveBaseUrl)
+    }
+
+    /**
+     * YouTube画面用WebViewClientを生成する共通ヘルパー(v1.89)。
+     * loadScreenYoutube()(IFrame APIラッパー経由)とfallbackToDirectEmbed()(直接embed)の
+     * 両方で使う。onPageFinished/onRenderProcessGoneのログ文言は呼び出し元ごとに変えたいため
+     * 引数化し、ネットワーク診断(onReceivedError/onReceivedHttpError)と広告リクエストの
+     * 握り潰し(shouldInterceptRequest)は共通化する。
+     *
+     * @param pageFinishedTag onPageFinished時のログに使うタグ(例: "onPageFinished" / "フォールバックonPageFinished")
+     * @param renderGoneTag   onRenderProcessGone時のログに使うタグ(例: "youtube view" / "youtube fallback view")
+     */
+    private fun createYoutubeWebViewClient(pageFinishedTag: String, renderGoneTag: String): WebViewClient {
+        return object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                addDebugLog("[YT] $pageFinishedTag url=$url")
+            }
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val crashed = detail?.didCrash() == true
+                addDebugLog("[WEBVIEW] Render process gone in $renderGoneTag (crashed=$crashed)")
+                handleWebViewCrash(view)
+                return true
+            }
+
+            /**
+             * メインフレーム以外(広告ステータス問い合わせ等のサブリソース)を含む全リクエストの
+             * ハードなネットワークエラーを記録する(v1.89)。エラー152はonErrorを発火させず
+             * プレイヤー内部UIとして表示されるだけのことがあり、原因の特定にはこの計測が必須。
+             * ワーカースレッドから呼ばれるためlogYtNetError内でhandler.post()する。
+             */
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                val host = request?.url?.host ?: "?"
+                val path = request?.url?.path ?: ""
+                val main = request?.isForMainFrame == true
+                logYtNetError("$host$path err=${error?.errorCode} ${error?.description} main=$main")
+            }
+
+            /** HTTPエラー応答(404/403等)も同様に記録する(v1.89) */
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                val host = request?.url?.host ?: "?"
+                val path = request?.url?.path ?: ""
+                val main = request?.isForMainFrame == true
+                logYtNetError("$host$path http=${errorResponse?.statusCode} main=$main")
+            }
+
+            /**
+             * YT_AD_BLOCK_HOSTS宛のリクエストを空のHTTP 200に差し替える(v1.89、B-2)。
+             * プロキシの接続拒否(ERR_CONNECTION_REFUSED等)は再生拒否の主因候補のため、
+             * 「広告なし」として振る舞わせることで再生拒否を回避できないか試す。
+             */
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                if (YOUTUBE_STUB_AD_REQUESTS) {
+                    val host = request?.url?.host
+                    if (host != null && YT_AD_BLOCK_HOSTS.any { host == it || host.endsWith(".$it") }) {
+                        logYtNetError("stub $host (ad-block)")
+                        return WebResourceResponse(
+                            "application/javascript", "utf-8", ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+        }
+    }
+
+    /**
+     * YouTube関連ドメインへの疎通プローブをYouTube画面到達時にもう一度実行する(v1.89、A-4)。
+     * onCreate()での1回だけでは起動直後でネットワークが未確立の可能性があるため、
+     * 実際にYouTube画面を表示するタイミングで再測定する。アプリ起動中1回のみ実施。
+     */
+    private fun rerunYoutubeProbeIfNeeded() {
+        if (youtubeProbeRerunDone) return
+        youtubeProbeRerunDone = true
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val result = serverClient.probeYoutubeConnectivity()
+                withContext(Dispatchers.Main) {
+                    youtubeProbeResult = result
+                    addDebugLog("[YT] 疎通(再) $result")
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    addDebugLog("[YT] 疎通(再)失敗: ${e.message}")
+                }
+            }
+        }
     }
 
     /** YouTube画面のロード（アクティブ=autoplay、先読み=無音ロードのみ） */
@@ -1863,22 +2024,20 @@ class PlayerActivity : ComponentActivity() {
         val autoplay = preloadType == null
         // このWebViewでの直接embedフォールバック実施フラグをリセット(v1.85)
         webView.tag = null
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                addDebugLog("[YT] onPageFinished url=$url")
-            }
-            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                val crashed = detail?.didCrash() == true
-                addDebugLog("[WEBVIEW] Render process gone in youtube view (crashed=$crashed)")
-                handleWebViewCrash(view)
-                return true
-            }
-        }
-        addDebugLog("[YT] load videoId=${screen.youtubeId} muted=$YOUTUBE_MUTED autoplay=$autoplay preload=$preloadType ua=...${YOUTUBE_USER_AGENT.takeLast(40)}")
+        webView.webViewClient = createYoutubeWebViewClient(
+            pageFinishedTag = "onPageFinished",
+            renderGoneTag = "youtube view"
+        )
+        // YouTube画面に初めて到達したタイミングで疎通プローブを再測定する(v1.89、A-4)
+        rerunYoutubeProbeIfNeeded()
+        addDebugLog(
+            "[YT] stage1(wrapper) load videoId=${screen.youtubeId} muted=$YOUTUBE_MUTED " +
+                "autoplay=$autoplay preload=$preloadType base=$youtubeEffectiveBaseUrl ua=...${YOUTUBE_USER_AGENT.takeLast(40)}"
+        )
         // https オリジンを付与して読み込む(エラー153対策、v1.83)。file:///android_asset/直読みは行わない。
+        // v1.89: youtubeEffectiveBaseUrl経由でnocookieドメインに切替え可能にした。
         webView.loadDataWithBaseURL(
-            YOUTUBE_PLAYER_BASE_URL,
+            youtubeEffectiveBaseUrl,
             buildYoutubeHtml(screen.youtubeId ?: "", YOUTUBE_MUTED, autoplay),
             "text/html", "utf-8", null
         )
@@ -1910,21 +2069,14 @@ class PlayerActivity : ComponentActivity() {
             advanceToNext()
             return
         }
-        val embedUrl = "https://www.youtube.com/embed/$id" +
+        // v1.89: youtubeEffectiveBaseUrl経由でnocookieドメインに切替え可能にした。
+        val embedUrl = "$youtubeEffectiveBaseUrl/embed/$id" +
             "?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&modestbranding=1&iv_load_policy=3&fs=0&disablekb=1"
-        addDebugLog("[YT] 直接embedへフォールバック: $embedUrl")
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                addDebugLog("[YT] フォールバックonPageFinished url=$url")
-            }
-            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                val crashed = detail?.didCrash() == true
-                addDebugLog("[WEBVIEW] Render process gone in youtube fallback view (crashed=$crashed)")
-                handleWebViewCrash(view)
-                return true
-            }
-        }
+        addDebugLog("[YT] stage2(直接embed)へフォールバック: $embedUrl")
+        webView.webViewClient = createYoutubeWebViewClient(
+            pageFinishedTag = "フォールバックonPageFinished",
+            renderGoneTag = "youtube fallback view"
+        )
         webView.loadUrl(embedUrl)
         // フォールバック中はJSからのENDED通知が来ないため、尺タイマーのみで進行を担保する
         contentTimer?.let { handler.removeCallbacks(it) }
@@ -2746,7 +2898,7 @@ class PlayerActivity : ComponentActivity() {
                 if (webView != activeWebView) return@post
                 val screen = flatScreens.getOrNull(currentScreenIndex)
                 if (screen?.type != "youtube") return@post
-                addDebugLog("[YT] 再生開始せず(watchdog) → 直接embedへフォールバック")
+                addDebugLog("[YT] stage1(wrapper)で再生開始せず(watchdog) → stage2(直接embed)へ")
                 fallbackToDirectEmbed(webView, screen)
             }
         }

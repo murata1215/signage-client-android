@@ -1,5 +1,23 @@
 # Issues
 
+## YouTube再生不能(エラー152-4)の原因特定 (v1.89)
+
+- [~] **計測+対処を実装・ビルド成功（2026-09-04）。実機検証待ち**
+  - 症状: `dt-astbx5-01`でYouTubeコンテンツが「この動画は再生できません / エラーコード: 152-4」で1フレームも再生できない
+  - v1.83〜v1.85で潰した仮説(origin=153対策・UA単一トークン化・IFrame APIラッパー・直接embedフォールバック)は
+    全てシロと判明: `fallbackToDirectEmbed()`(素のhttps直接embed、合成オリジン非経由)でも同じ152-4が再現するため
+  - 最有力仮説: 企業プロキシ(210.175.128.100:8080)が`static.doubleclick.net`等の広告系ドメインを遮断しており、
+    埋め込みプレイヤーの再生前広告ステータス問い合わせが失敗→再生拒否(onErrorは発火せずプレイヤー内部UIとして
+    表示されるだけ、なのでv1.85のwatchdogでしか検知できなかった症状と一致)
+  - 計測: `onReceivedError`/`onReceivedHttpError`でサブリソース失敗を`[YT-NET]`ログ化、疎通プローブに
+    doubleclick等4項目追加、YouTube画面到達時に疎通プローブ再実行
+  - 対処: `youtube-nocookie.com`切替え(B-1)、広告系ホストの`shouldInterceptRequest`空200化(B-2)、
+    Desktop UA化(B-3)、watchdog猶予延長12→20秒+段階ログ(B-4)。いずれもフラグ1つで無効化可能な設計
+  - リリース: versionCode 89 / versionName "1.89"
+  - 次アクション: `dt-astbx5-01`で実機検証。オーバーレイ1ページ目の`[YT-NET]`ログと3ページ目の`YT疎通:`から
+    原因を確定 → 再生成功ならそのままクローズ、`*.googlevideo.com`自体が塞がれていると判明した場合は
+    ネットワーク管理者への許可依頼 or サーバー側にmp4を置く新typeの実装を検討
+
 ## APK OTA更新 dev/prod チャネル分離
 
 - [x] **Phase 1（サーバー側）**: signage-server-windows で実装完了・実データ検証済み（2026-09-03）
