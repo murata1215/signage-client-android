@@ -90,6 +90,8 @@ class PlayerActivity : ComponentActivity() {
     private var debugPage = 0  // 0=非表示, 1=デバッグログ, 2=スケジュール, 3=端末情報, 4=命名マニュアル
     private var lastHeartbeatTime: String? = null
     private var lastScheduleUpdateTime: String? = null
+    /** 日付フィルタでスキップされたファイルの直近ログ内容(重複ログ抑止用・v1.87) */
+    private var lastSkipSignature: String? = null
 
     // 3-WebView architecture: active + next (preloaded) + prev (preloaded)
     private var activeWebView: WebView? = null
@@ -277,6 +279,18 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /** 日付フィルタで非表示になったファイルをログに出す（内容が変わった時のみ・Mainスレッドから呼ぶこと・v1.87） */
+    private fun logDateSkippedIfChanged() {
+        val skipped = smbPdfManager?.getDateSkipped().orEmpty()
+        val sig = skipped.joinToString("|") { it.filename }
+        if (sig == lastSkipSignature) return
+        lastSkipSignature = sig
+        if (skipped.isEmpty()) return
+        val names = skipped.take(3).joinToString(", ") { it.filename.take(20) }
+        val more = if (skipped.size > 3) " ほか${skipped.size - 3}件" else ""
+        addDebugLog("[SMB] 期限外スキップ: ${skipped.size}件 ($names$more)")
+    }
+
     private fun cycleDebugPage() {
         debugPage = (debugPage + 1) % 5  // 0→1→2→3→4→0
         if (debugPage == 0) {
@@ -321,6 +335,21 @@ class PlayerActivity : ComponentActivity() {
             val dur = "${screen.durationSeconds}秒"
             val allPages = if (screen.isAllPages) " [全頁]" else ""
             sb.append("${prefix}${idx + 1}. [$typeTag] ${screen.displayName} ($dur)$allPages\n")
+        }
+
+        val skipped = smbPdfManager?.getDateSkipped().orEmpty()
+        if (skipped.isNotEmpty()) {
+            val dateFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy/M/d")
+            sb.append("─".repeat(20)).append("\n")
+            sb.append("非表示(期限切れ): ${skipped.size}件\n")
+            skipped.take(8).forEach { s ->
+                val name = if (s.filename.length > 30) s.filename.take(30) + "…" else s.filename
+                val reason = if (s.isBeforeStart) "開始前" else "期限切れ"
+                sb.append("  $name (${s.startDate.format(dateFmt)}〜${s.endDate.format(dateFmt)} $reason)\n")
+            }
+            if (skipped.size > 8) {
+                sb.append("  ...ほか${skipped.size - 8}件\n")
+            }
         }
 
         return sb.toString().trimEnd()
@@ -1266,6 +1295,7 @@ class PlayerActivity : ComponentActivity() {
             flatScreens = screens
             currentScreenIndex = 0
             addDebugLog("[PLAY] フラットリスト構築完了: ${screens.size}画面")
+            logDateSkippedIfChanged()
         }
 
         if (flatScreens.isEmpty()) {
@@ -1296,6 +1326,7 @@ class PlayerActivity : ComponentActivity() {
      */
     private fun buildFlatScreens(playlist: List<PlaylistItem>): List<FlatScreen> {
         val screens = mutableListOf<FlatScreen>()
+        smbPdfManager?.resetDateSkipped()
 
         playlist.forEachIndexed { mainIdx, item ->
             when (item.type) {
@@ -1407,6 +1438,7 @@ class PlayerActivity : ComponentActivity() {
                                 buildFlatScreens(items)
                             }
                             applyRefreshedScreens(newScreens)
+                            logDateSkippedIfChanged()
                         } catch (e: Exception) {
                             addDebugLog("[SMB] 定期同期エラー: ${e.message}")
                         }

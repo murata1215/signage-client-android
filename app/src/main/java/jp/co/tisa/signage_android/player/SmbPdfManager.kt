@@ -67,6 +67,21 @@ class SmbPdfManager(private val context: Context) {
 
     fun getLocalPdfFile(contentId: Int): File? = localFileMap[contentId]
 
+    /** 命名規約の日付範囲外で非表示になったファイル（デバッグ表示用） */
+    data class SkippedByDate(
+        val folderName: String,      // 親pdf_folderの名前
+        val filename: String,
+        val startDate: LocalDate,
+        val endDate: LocalDate,
+        val isBeforeStart: Boolean   // true=まだ開始前 / false=期限切れ
+    )
+
+    // 親pdf_folder.id → 直近の buildPlaylist で日付により除外されたファイル
+    private val dateSkippedMap = java.util.concurrent.ConcurrentHashMap<Int, List<SkippedByDate>>()
+
+    fun getDateSkipped(): List<SkippedByDate> = dateSkippedMap.values.flatten()
+    fun resetDateSkipped() = dateSkippedMap.clear()
+
     // =====================================================================
     // UNC Path parsing
     // =====================================================================
@@ -454,17 +469,30 @@ class SmbPdfManager(private val context: Context) {
 
         val configuredEntries = mutableListOf<ParsedEntry>()
         val defaultEntries = mutableListOf<SmbCacheEntry>()
+        val skipped = mutableListOf<SkippedByDate>()
 
         for (entry in entries) {
             val config = parseFileNameConfig(entry.filename)
             if (config != null) {
                 // 日付範囲外のファイルはスキップ
-                if (today < config.startDate || today > config.endDate) continue
+                if (today < config.startDate || today > config.endDate) {
+                    skipped.add(
+                        SkippedByDate(
+                            folderName = parentItem.name,
+                            filename = entry.filename,
+                            startDate = config.startDate,
+                            endDate = config.endDate,
+                            isBeforeStart = today < config.startDate
+                        )
+                    )
+                    continue
+                }
                 configuredEntries.add(ParsedEntry(entry, config))
             } else {
                 defaultEntries.add(entry)
             }
         }
+        dateSkippedMap[parentItem.id] = skipped
 
         // ソート: 規約ファイルはsortOrder順、規約外はファイル名アルファベット順
         val sortedConfigured = configuredEntries.sortedBy { it.config.sortOrder }
