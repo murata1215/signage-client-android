@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.91 (2026-09-04)
+- YouTube動画の音声を出せるようにした(v1.82以来の常時ミュートを解消)
+  - 前提: リモコンの音量＋/−・消音ボタンはサイネージアプリ表示中でも**システム側で制御できる**ことをユーザーが実機確認済み(Firefoxでも音が出ることを確認済み)。したがって**アプリ側には音量調整・ミュート制御・端末ごとの音声設定を一切実装しない**方針とした(検討した「端末ごとにリモコンでON/OFF」案は不要と判断し不採用)
+  - 実装: `youtube-player.html`は`__MUTED__`=trueで常にミュートロードのまま。`onStateChange`が実際にPLAYING(1)へ遷移した時点で`onYoutubePlaying()`をAndroidへ通知(1ロード1回)。`PlayerActivity`は`activeWebView`かつ`YOUTUBE_SOUND_ENABLED`(既定true)のときだけ`ytUnmute(100)`をJS経由で呼ぶ。「再生の成立を実測してから音を足す」ことで、いきなり音アリ自動再生してChromium/YouTubeの自動再生ポリシーに拒否され再生自体が止まるリスクを回避(v1.85の再生開始watchdog、v1.90の尺通知と同じ設計思想)
+  - 自動復帰: アンミュート直後に`onStateChange`がPAUSED(2)へ落ちた場合(自動再生ポリシー拒否とみなす)、JS側が1回だけ`ytMute()`→`playVideo()`し直す(`unmuteReverted`で多重発火防止。無音でも映像は絶対に止めない)
+  - `ytStop()`(降格・`onPause()`時に呼ばれる)に`ytMute()`を追加し、非アクティブWebViewから音が残る余地を無くした
+  - `YOUTUBE_SOUND_ENABLED`定数(既定true)はキルスイッチ。実機で音声ONが再生の妨げになった場合は`false`にするだけでv1.90と同じ完全無音へ即座に戻せる
+  - オーバーレイ3ページ目の`WebView:`直後に`ビルド: ${Build.DISPLAY}`を追加(下記のエラー5診断でファーム差の可視化が有効と分かったため、`-02`/`-03`の予防点検用)
+  - リリース: versionCode 91 / versionName "1.91"
+  - `ConfigManager.kt` / `AndroidManifest.xml` / `dispatchKeyEvent()` / `Models.kt` / `FlatScreen.kt` / `ServerClient.kt` / `SmbPdfManager.kt` / `SignageService.kt` は無改修。サーバー側(signage-server-windows)の変更も不要
+
+## `dt-astbx5-04` YouTubeエラー5の原因診断・解消 (2026-09-04、コード変更なし)
+- 症状: `dt-astbx5-04`のみYouTubeがタイトル表示後すぐエラーになり次のコンテンツへスキップされる(`-01`等は正常再生)
+- ユーザーの初期仮説「4K/FullHDの解像度差では?」を実測で否定: オーバーレイ3ページ目の`画面:`表示は両機とも`1920x1080 (dpr: 2.0)`で同一
+- ネットワーク差も否定: `-01`(10.20.249.61)/`-04`(10.20.249.64)は同一/24、同一ゲートウェイ(10.20.249.251)、同一プロキシ(210.175.128.100:8080)
+- ログ`[YT-JS:active] stateChange=1(PLAYING)→stateChange=3(BUFFERING)→onError code=5`から、失敗箇所はWebViewのメディアパイプライン層と特定
+- オーバーレイ3ページ目の`WebView:`表示から`-01`=146.0.7680.119、`-04`=140.0.7298.0と判明。両機とも`com.android.webview`(AOSP実装)のためPlayストア経由の個別更新は不可、ファームウェア更新でのみ更新される
+- I-O DATA公式のファームウェア更新手順(https://www.iodata.jp/lib/manual/ds-astbx5/002setup/008fw.html)を`-04`へ適用 → WebViewが更新されYouTube再生成功。**アプリのコード変更は無し(診断のみ)**
+- 残タスク: `-02`/`-03`もオーバーレイ3ページ目でWebView版数を確認し、140系ならファーム更新を推奨(予防)
+
 ## v1.90 (2026-09-04)
 - 【重要】YouTubeコンテンツの表示秒数が0(デフォルト)のとき、次の画面へ進まなくなる不具合を修正
   - 原因: 表示秒数0のYouTubeは「動画終了(ENDED)まで再生」する`playToEnd`モードになり、進行はJSの`onStateChange(ENDED)`通知のみが担当。安全弁タイマーは`YOUTUBE_MAX_DURATION_SEC`(3600秒/1時間)のみだった。ANN NEWS24等の**24時間ライブ配信はENDEDが永久に来ない**ため、最大1時間「固まった」ように見えていた

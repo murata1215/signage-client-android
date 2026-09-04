@@ -455,6 +455,8 @@ class PlayerActivity : ComponentActivity() {
         // ── WebView / YouTube診断(v1.85) ──
         sb.append("${"─".repeat(20)}\n")
         sb.append("WebView: $webViewImplInfo\n")
+        // v1.91: エラー5(WebView版数差)の再発時に、ファームウェアの版数を現地で即確認できるようにする
+        sb.append("ビルド: ${Build.DISPLAY}\n")
         val uaDisplay = defaultUserAgent.takeLast(70)
         sb.append("UA: ...$uaDisplay\n")
         // 疎通対象が9項目(v1.89でdoubleclick等4件追加)になり1行に収まらないため、4項目ごとに改行する
@@ -1746,8 +1748,22 @@ class PlayerActivity : ComponentActivity() {
     // アクティブ昇格時にytPlay()を呼んで再生開始する。
     // =========================================================================
 
-    /** YouTube: 既定でミュート再生（サイネージ用途。音声不要かつ自動再生が確実） */
+    /**
+     * YouTube: 初期ロードは常にミュートで始める（自動再生の確実性のため）。
+     * 音声を出すかどうかは別途 YOUTUBE_SOUND_ENABLED が決める。false固定にはしない(v1.91)。
+     */
     private val YOUTUBE_MUTED = true
+    /**
+     * YouTube: 音声を出すか(v1.91)。
+     * 端末の音量調整・消音はリモコンからシステム側で制御できることを確認済みのため、
+     * アプリ側では音量やミュートのUI/設定を一切持たず、この定数で「出す/出さない」を切り替えるだけにする。
+     * true固定が既定。万一「音声ONにすると自動再生ポリシーで再生自体が拒否される」等の
+     * 問題が実機で起きた場合は、この値をfalseにするだけでv1.90と同じ完全無音の挙動へ即座に戻せる
+     * (切り戻し用のキルスイッチ)。
+     */
+    private val YOUTUBE_SOUND_ENABLED = true
+    /** YouTube: アンミュート時のプレイヤー音量(0-100)。最終的な音量は端末/TV側の音量にも依存する(v1.91) */
+    private val YOUTUBE_VOLUME_PERCENT = 100
     /** YouTube: duration_seconds<=0 のとき動画の最後まで再生して次へ進む */
     private val YOUTUBE_ADVANCE_ON_END = true
     /**
@@ -1871,9 +1887,13 @@ class PlayerActivity : ComponentActivity() {
         view?.evaluateJavascript("if(window.ytPlay)ytPlay();", null)
     }
 
-    /** 非アクティブに降格したYouTube WebViewの再生を停止する（裏で音が鳴るのを防止） */
+    /**
+     * 非アクティブに降格したYouTube WebViewの再生を停止する（裏で音が鳴るのを防止）。
+     * v1.91: pauseだけでなくミュートも行い、降格したWebViewから音が出る余地を無くす
+     * (アンミュート状態のまま一時停止→何らかの理由で再生が再開した場合の保険)。
+     */
     private fun ytStop(view: WebView?) {
-        view?.evaluateJavascript("if(window.ytStop)ytStop();", null)
+        view?.evaluateJavascript("if(window.ytMute)ytMute();if(window.ytStop)ytStop();", null)
     }
 
     /** スクリーンをWebViewにロードする */
@@ -2929,6 +2949,22 @@ class PlayerActivity : ComponentActivity() {
 
                 remainingSeconds = limit
                 startCountdown()
+            }
+        }
+
+        /**
+         * YouTube: 実際に再生が始まった(PLAYING)通知(v1.91)。音声ONの起点。
+         * activeWebViewのときだけアンミュートを指示するため、先読み(INVISIBLE)WebViewや
+         * 降格済みWebViewから音が漏れることは原理的に起こらない。
+         * YOUTUBE_SOUND_ENABLED=falseならここで何もせず、v1.90までと同じ完全無音のまま。
+         */
+        @JavascriptInterface
+        fun onYoutubePlaying() {
+            handler.post {
+                if (webView != activeWebView) return@post
+                if (!YOUTUBE_SOUND_ENABLED) return@post
+                webView.evaluateJavascript("if(window.ytUnmute)ytUnmute($YOUTUBE_VOLUME_PERCENT);", null)
+                addDebugLog("[YT] 再生開始 → 音声ON (vol=$YOUTUBE_VOLUME_PERCENT%)")
             }
         }
 

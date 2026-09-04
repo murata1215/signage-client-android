@@ -34,6 +34,14 @@
     onYoutubeDuration()でAndroid側へ通知する(1ロードにつき1回、durationNotifiedで抑止)。
     ライブ配信はgetDuration()が0を返しonStateChange(ENDED)も永久に来ないため、
     Android側(playToEndモードの安全弁タイマー)がこの値を見て自身のタイマーを締め直す。
+  - 音声(v1.91): CONFIG.mutedは常にtrueでロードされる(自動再生の確実性を優先)。
+    onStateChangeでPLAYING(state=1)へ実際に遷移した時点でonYoutubePlaying()をAndroidへ通知し、
+    Android側が「activeWebViewか」を判定してから window.ytUnmute() を呼ぶ(1ロード1回、
+    playingNotifiedで抑止)。いきなりミュート無しで自動再生すると、Chromium/YouTube側の
+    自動再生ポリシーに拒否され再生自体が止まるリスクがあるため、
+    「再生の成立を実測してから音を足す」設計にしている(v1.85のwatchdog、v1.90の尺通知と同じ考え方)。
+    万一アンミュート直後にPAUSED(state=2)へ落ちた場合は、自動再生ポリシー拒否とみなし
+    1回だけミュートへ戻して再生し直す(unmuteRevertedで多重発火を抑止。無音でも映像は絶対に止めない)。
 -->
 <html>
 <head>
@@ -91,6 +99,13 @@
     var currentMuted = true;
     // v1.90: 1ロードにつき動画尺を1回だけAndroidへ通知したかどうか
     var durationNotified = false;
+    // v1.91: 1ロードにつきPLAYING通知を1回だけ行ったかどうか(音声ONの起点)
+    var playingNotified = false;
+    // v1.91: 現在アンミュート状態かどうか(ytUnmute/ytMuteで更新)
+    var unmuted = false;
+    // v1.91: アンミュート直後の自動再生ポリシー拒否によるPAUSEDを検知し、
+    // 1回だけミュートに戻して再生し直す処理を、多重発火させないためのフラグ
+    var unmuteReverted = false;
 
     // 再生開始watchdogの猶予秒数(v1.85、v1.89で12→20秒に延長): onReady後この秒数以内に
     // 再生状態(PLAYING)へ遷移しなければ再生不能とみなしonYoutubeStalled()を通知する。
@@ -155,6 +170,10 @@
       playWatchdogElapsed = 0;
       stalledNotified = false;
       durationNotified = false;
+      // v1.91: 新しいロードごとに音声関連の状態をリセットする
+      playingNotified = false;
+      unmuted = false;
+      unmuteReverted = false;
       // プレイヤー生成watchdog: 15秒以内にonReadyが来なければ次へ進めるようエラー通知(v1.84)
       readyWatchdogTimer = setTimeout(function() {
         log('onReady watchdog timeout(15s)');
@@ -212,6 +231,19 @@
               try { if (player && typeof player.getDuration === 'function') { dur = player.getDuration(); } } catch (e) {}
               log('duration=' + dur);
               notify('onYoutubeDuration')(dur);
+            }
+            // v1.91: 再生が実際に始まったことをAndroidへ通知する(音声ONの起点)。1ロード1回。
+            // activeWebViewかどうかの判定と実際のアンミュート指示はAndroid側が行う。
+            if (event.data === 1 && !playingNotified) {
+              playingNotified = true;
+              notify('onYoutubePlaying')();
+            }
+            // v1.91: アンミュート直後にYouTube/Chromiumの自動再生ポリシーで再生が止められた場合の自動復帰。
+            // PAUSED(2)へ落ちたら1回だけミュートに戻して再生し直す(無音でも映像は絶対に流す)。
+            if (event.data === 2 && unmuted && !unmuteReverted) {
+              unmuteReverted = true;
+              log('sound: paused after unmute -> revert to muted');
+              try { player.mute(); unmuted = false; player.playVideo(); } catch (e) {}
             }
             // YT.PlayerState.ENDED === 0
             if (event.data === 0) {
@@ -275,6 +307,32 @@
       if (player && typeof player.pauseVideo === 'function') {
         try { player.pauseVideo(); } catch (e) {}
       }
+    };
+
+    /**
+     * v1.91: Androidから呼ばれ、音声をONにする。
+     * onYoutubePlaying()通知を受けたAndroidが「activeWebViewかつ音声ON」と判断した時だけ呼ぶ想定
+     * (先読み中の非表示WebViewや降格済みWebViewからは呼ばれない)。
+     * vol: 0-100のプレイヤー音量。最終的な音量は端末/TV側の音量にも依存する。
+     */
+    window.ytUnmute = function(vol) {
+      if (!player) return;
+      try {
+        player.unMute();
+        if (typeof vol === 'number') { player.setVolume(vol); }
+        unmuted = true;
+        log('unmuted vol=' + vol);
+      } catch (e) {}
+    };
+
+    /** v1.91: Androidから呼ばれ、音声をOFF(ミュート)にする。降格・停止時に確実に無音へ戻すため */
+    window.ytMute = function() {
+      if (!player) return;
+      try {
+        player.mute();
+        unmuted = false;
+        log('muted');
+      } catch (e) {}
     };
   </script>
 </body>
