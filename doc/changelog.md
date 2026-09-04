@@ -13,6 +13,12 @@
 - リリース: versionCode 89 / versionName "1.89"
 - `AndroidManifest.xml` / `ConfigManager.kt` / `SmbPdfManager.kt` / `SignageService.kt` は無改修。サーバー側(signage-server-windows)の変更も不要
 
+### 実機検証結果（2026-09-04 08:51 `dt-astbx5-01`）
+- **YouTube再生に成功**(`[YT-JS:active] stateChange=1`→`watch cleared(playing)`、stage1(wrapper)のまま。stage2直接embedへのフォールバックは発生せず)
+- **事前の最有力仮説(企業プロキシによるdoubleclick遮断)はシロと判明**: 実測`YT疎通: dclick=200 gads=200`(遮断なし)、`[YT-NET]`ログ0件、B-2(広告ホストの空200スタブ)も0件で不発
+- 効いたと推定されるのはB-1(`youtube-nocookie.com`切替)とB-3(Desktop UA化)のいずれか、または両方。切り分けは実施せず、フラグは全て現状維持
+- 残検証: 動画終了→次画面自動送り(現状1画面のみのため未検証)、web/PDF/SMB画面のデグレ確認
+
 ## v1.88 (2026-09-03)
 - 【重要】投影コンテンツが1〜2件のとき、リモコンの↓(画面一覧オーバーレイ)を押すと確実にアプリが落ちる不具合を修正
   - 原因: `renderScreenList()` の7行窓インデックス計算がKotlinの `%`(floorModではなく剰余)により負値になり、`flatScreens[-1]` で `ArrayIndexOutOfBoundsException`

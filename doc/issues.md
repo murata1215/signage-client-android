@@ -2,21 +2,29 @@
 
 ## YouTube再生不能(エラー152-4)の原因特定 (v1.89)
 
-- [~] **計測+対処を実装・ビルド成功（2026-09-04）。実機検証待ち**
+- [x] **実機検証完了・再生成功（2026-09-04 08:51 `dt-astbx5-01`）**
   - 症状: `dt-astbx5-01`でYouTubeコンテンツが「この動画は再生できません / エラーコード: 152-4」で1フレームも再生できない
   - v1.83〜v1.85で潰した仮説(origin=153対策・UA単一トークン化・IFrame APIラッパー・直接embedフォールバック)は
     全てシロと判明: `fallbackToDirectEmbed()`(素のhttps直接embed、合成オリジン非経由)でも同じ152-4が再現するため
-  - 最有力仮説: 企業プロキシ(210.175.128.100:8080)が`static.doubleclick.net`等の広告系ドメインを遮断しており、
-    埋め込みプレイヤーの再生前広告ステータス問い合わせが失敗→再生拒否(onErrorは発火せずプレイヤー内部UIとして
-    表示されるだけ、なのでv1.85のwatchdogでしか検知できなかった症状と一致)
   - 計測: `onReceivedError`/`onReceivedHttpError`でサブリソース失敗を`[YT-NET]`ログ化、疎通プローブに
     doubleclick等4項目追加、YouTube画面到達時に疎通プローブ再実行
   - 対処: `youtube-nocookie.com`切替え(B-1)、広告系ホストの`shouldInterceptRequest`空200化(B-2)、
     Desktop UA化(B-3)、watchdog猶予延長12→20秒+段階ログ(B-4)。いずれもフラグ1つで無効化可能な設計
   - リリース: versionCode 89 / versionName "1.89"
-  - 次アクション: `dt-astbx5-01`で実機検証。オーバーレイ1ページ目の`[YT-NET]`ログと3ページ目の`YT疎通:`から
-    原因を確定 → 再生成功ならそのままクローズ、`*.googlevideo.com`自体が塞がれていると判明した場合は
-    ネットワーク管理者への許可依頼 or サーバー側にmp4を置く新typeの実装を検討
+  - **実機検証結果**: `[YT-JS:active] stateChange=1`→`watch cleared(playing)`で再生成功を確認。
+    `[YT] onPageFinished url=https://www.youtube-nocookie.com/`のみでstage1(wrapper)のまま成功、
+    `stage2(直接embed)`へのフォールバックは発生せず
+  - **事前の最有力仮説(企業プロキシによるdoubleclick遮断)はシロと判明**: `YT疎通:`実測が
+    `dclick=200 gads=200`(遮断なし)、`[YT-NET]`ログも0件、広告ホストの`shouldInterceptRequest`スタブ(B-2)も
+    0件で不発。`ytimg=404`/`jnnpa=404`は到達済みだが該当パスにfaviconが無いだけで異常ではない
+  - **効いたと推定される対処**: B-1(`youtube-nocookie.com`切替、host/origin/baseUrl一括連動)と
+    B-3(YouTube画面のみDesktop UA化。152-x系は「モバイルChromeでは埋め込み再生不可」の意味のコードのため)の
+    いずれか、または両方。切り分けテスト(B-1を戻して再現確認等)は「動くようになった直後に意図的に壊す」
+    リスクに見合わないため実施しない。フラグは全て現状(`true`)のまま維持
+  - 残検証(急ぎではない、次回スケジュール変更時): (1) 動画終了→次画面への自動送り
+    (`onYoutubeEnded`経路、現状flatScreens 1画面のみのため未検証)、(2) web(intramart自動フィット拡大)/PDF/SMB
+    画面のデグレが無いこと
+  - 本番反映: 問題なければユーザーが`本番反映.bat`で本番4台へ展開(v1.87/v1.88/v1.89まとめて反映)
 
 ## APK OTA更新 dev/prod チャネル分離
 
