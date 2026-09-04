@@ -1757,6 +1757,19 @@ class PlayerActivity : ComponentActivity() {
      * 未指定/取得漏れ時のフェイルセーフとしてこの値を用いる。
      */
     private val YOUTUBE_MAX_DURATION_SEC = 3600
+    /**
+     * YouTube: ライブ配信/尺不明(getDuration()<=0)のときに表示し続ける秒数(v1.90)。
+     * playToEndモードでは本来ENDEDで次へ進むが、ライブ配信はENDEDが永久に来ないため
+     * YOUTUBE_MAX_DURATION_SEC(1時間)まで固まって見えていた不具合の修正。
+     * onYoutubeDuration()でduration<=0と判明した時点でcontentTimerをこの秒数に締め直す。
+     */
+    private val YOUTUBE_LIVE_DURATION_SEC = 180
+    /**
+     * YouTube: 動画尺が判明したとき、安全弁タイマーへ上乗せする猶予秒(v1.90)。
+     * onYoutubeEnded()の取りこぼし(ネットワーク遅延等)に備えた保険で、
+     * 通常は猶予に達する前にonYoutubeEnded()が先に発火し進行する。
+     */
+    private val YOUTUBE_END_GRACE_SEC = 15
     /** YouTube: 先読み中に onYoutubeReady() が来ない場合に強制readyにするまでの時間(ms)(v1.84) */
     private val YOUTUBE_PRELOAD_READY_TIMEOUT_MS = 15000L
 
@@ -2367,6 +2380,17 @@ class PlayerActivity : ComponentActivity() {
         totalPdfPages = 1
         // 全頁モードのカウントダウンはper-page秒を起点に（durationSecondsは安全弁の総時間のため不適）
         remainingSeconds = if (screen.isAllPages) pdfPageDurationSec else screen.durationSeconds
+        // v1.90: 直前の文言("フォルダ同期中..."等)の残留を防ぐため、ここで必ず1回書く。
+        // startCountdown()はremainingSeconds--した結果が負(0以下のとき)は初回tickで
+        // 何も書かずに停止してしまうため、その表示を丸ごと任せると前の文言が固着したままになる
+        // (表示秒数0=playToEndのYouTube画面で必ず発生していた不具合)。
+        val label = if (screen.isAllPages) "次のページまで" else "次の切替まで"
+        statusBar.text = when {
+            remainingSeconds > 0 -> formatStatusText(screen.displayTitle, "$label: ${remainingSeconds}秒")
+            screen.type == "youtube" && screen.playToEnd ->
+                formatStatusText(screen.displayTitle, "再生中(動画の終わりまで)")
+            else -> formatStatusText(screen.displayTitle, "表示中")
+        }
         startCountdown()
         maybeScheduleWebCapture(screen)
     }
@@ -2872,6 +2896,39 @@ class PlayerActivity : ComponentActivity() {
                     contentTimer?.let { handler.removeCallbacks(it) }
                     advanceToNext()
                 }
+            }
+        }
+
+        /**
+         * YouTube: 再生開始時の動画尺(秒)通知(v1.90)。
+         * playToEnd(管理画面の表示秒数が0)モードの安全弁タイマーを実測値で締め直す。
+         *  - 尺>0(通常動画): onYoutubeEnded()を取りこぼしても尺+猶予で必ず次へ進むようにする
+         *  - 尺<=0(ライブ配信/尺不明): ENDEDは永久に来ないためYOUTUBE_LIVE_DURATION_SECで打ち切る
+         * 表示秒数を明示指定した画面(playToEnd=false)には一切干渉しない。
+         */
+        @JavascriptInterface
+        fun onYoutubeDuration(seconds: Double) {
+            handler.post {
+                if (webView != activeWebView) return@post
+                val screen = flatScreens.getOrNull(currentScreenIndex)
+                if (screen?.type != "youtube" || !screen.playToEnd) return@post
+
+                val limit = if (seconds > 0.5) {
+                    minOf(seconds.toInt() + YOUTUBE_END_GRACE_SEC, YOUTUBE_MAX_DURATION_SEC).also {
+                        addDebugLog("[YT] 動画尺=${seconds.toInt()}秒 → 安全弁を${it}秒に短縮")
+                    }
+                } else {
+                    YOUTUBE_LIVE_DURATION_SEC.also {
+                        addDebugLog("[YT] ライブ配信/尺不明(duration=0) → ${it}秒で次のコンテンツへ")
+                    }
+                }
+
+                contentTimer?.let { handler.removeCallbacks(it) }
+                contentTimer = Runnable { advanceToNext() }
+                    .also { handler.postDelayed(it, (limit * 1000).toLong()) }
+
+                remainingSeconds = limit
+                startCountdown()
             }
         }
 

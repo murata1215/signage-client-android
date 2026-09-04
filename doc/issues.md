@@ -1,5 +1,30 @@
 # Issues
 
+## YouTubeライブ配信で次画面へ進まない + ステータスバー固着 (v1.90)
+
+- [~] **実装完了・ビルド成功（2026-09-04）。実機検証待ち**
+  - 症状: v1.89でYouTube再生自体には成功したが、実機で3画面中「ANN NEWS24」(表示秒数0=デフォルト)から
+    次の画面へ進まず、ステータスバーが「フォルダ同期中...」のまま固まる
+  - 原因1(本命): 表示秒数0のYouTubeは`FlatScreen.playToEnd = item.durationSeconds <= 0`により
+    「動画終了(ENDED)まで再生」モードになり、進行はJSの`onStateChange(ENDED)`通知のみが担当。
+    安全弁タイマーは`YOUTUBE_MAX_DURATION_SEC`(3600秒)のみ。ANN NEWS24は**24時間ライブ配信**のため
+    ENDEDが永久に来ず、最大1時間「固まった」ように見えていた
+  - 原因2: `updateScreenStatusBar()`が自分ではstatusBarに書かず`startCountdown()`の初回tickに
+    表示を委ねていたが、`remainingSeconds`が0だと`remainingSeconds--`で-1になり
+    `if (remainingSeconds >= 0)`が偽のまま一度もテキストを書かずに停止、直前の
+    `startPlayback()`が書いた「フォルダ同期中...」がそのまま残留(表示秒数0のYouTube画面で必ず発生)
+  - 修正1: `updateScreenStatusBar()`で`startCountdown()`を呼ぶ前に必ず1回`statusBar.text`を設定
+  - 修正2: `youtube-player.html`が`onStateChange`のPLAYING遷移時に`player.getDuration()`を実測して
+    `onYoutubeDuration()`でAndroidへ通知(1ロード1回)。`PlayerActivity`は`playToEnd`画面のときだけ
+    `contentTimer`を締め直す: 尺>0(通常動画)は「尺+15秒」、尺<=0(ライブ配信/尺不明)は
+    **180秒**(`YOUTUBE_LIVE_DURATION_SEC`)で強制的に次へ進む。表示秒数を明示指定した画面には無干渉
+  - リリース: versionCode 90 / versionName "1.90"
+  - `FlatScreen.kt` / `ServerClient.kt` / `ScheduleManager.kt` / `SmbPdfManager.kt` /
+    `SignageService.kt` / `AndroidManifest.xml` は無改修。サーバー側の変更も不要
+  - 次アクション: `dt-astbx5-01`で実機検証。(1)現在の暫定回避策(60秒明示指定)のまま3画面が巡回すること
+    (2)表示秒数を0に戻してライブ配信が180秒で次へ進むこと・ステータスバーが固着しないこと
+    (3)web/PDF/SMBのデグレが無いこと → 問題なければ`本番反映.bat`で本番4台へ
+
 ## YouTube再生不能(エラー152-4)の原因特定 (v1.89)
 
 - [x] **実機検証完了・再生成功（2026-09-04 08:51 `dt-astbx5-01`）**

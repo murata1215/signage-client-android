@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.90 (2026-09-04)
+- 【重要】YouTubeコンテンツの表示秒数が0(デフォルト)のとき、次の画面へ進まなくなる不具合を修正
+  - 原因: 表示秒数0のYouTubeは「動画終了(ENDED)まで再生」する`playToEnd`モードになり、進行はJSの`onStateChange(ENDED)`通知のみが担当。安全弁タイマーは`YOUTUBE_MAX_DURATION_SEC`(3600秒/1時間)のみだった。ANN NEWS24等の**24時間ライブ配信はENDEDが永久に来ない**ため、最大1時間「固まった」ように見えていた
+  - 修正: `youtube-player.html`が`onStateChange`のPLAYING遷移時に`player.getDuration()`を実測して`onYoutubeDuration()`でAndroidへ通知。`PlayerActivity`はこれを受けて`playToEnd`画面の安全弁タイマーを締め直す — 通常動画(尺>0)は「尺+15秒」、ライブ配信/尺不明(尺<=0)は**180秒**で強制的に次へ進むようにした
+  - 表示秒数を明示指定した画面には一切干渉しない設計。`YOUTUBE_MAX_DURATION_SEC`(3600秒)は尺通知が来ない場合の最後の砦としてそのまま残す
+- ステータスバーが「フォルダ同期中...」等の文言のまま固着する不具合を修正
+  - 原因: `updateScreenStatusBar()`は自分ではステータスバーに書かず`startCountdown()`の初回tickに表示を委ねていたが、`remainingSeconds`が0だと初回tickで即座に停止し一度も書き込まないまま終了、直前の文言が残留していた(表示秒数0のYouTube画面で必ず発生)
+  - 修正: `updateScreenStatusBar()`で`startCountdown()`を呼ぶ前に必ず1回`statusBar.text`を設定するよう変更。画面種別に依らず固着を構造的に解消
+- リリース: versionCode 90 / versionName "1.90"
+- `FlatScreen.kt` / `ServerClient.kt` / `ScheduleManager.kt` / `SmbPdfManager.kt` / `SignageService.kt` / `AndroidManifest.xml` は無改修。サーバー側(signage-server-windows)の変更も不要
+
 ## v1.89 (2026-09-04)
 - YouTube再生不能(エラー152-4)の原因特定用の計測を追加 + 有力な対処を投入。v1.83〜v1.85で潰した仮説(origin/153対策・UA単一トークン化・直接embedフォールバック)は全てシロと判明(直接embedでも152-4が再現するため)。WebViewベースのYouTube再生で同様の152が「広告ステータス問い合わせ(static.doubleclick.net/instream/ad_status.js)がプロキシ等でERR_CONNECTION_REFUSEDになり再生自体が拒否される」事例と一致することが有力な仮説
 - 【計測】YouTube用WebViewClientに`onReceivedError`/`onReceivedHttpError`を追加し、サブリソース含む全リクエストの失敗を`[YT-NET] host/path err=... main=...`としてログ出力(ホスト+詳細単位で重複除去、最大8件)。ワーカースレッドから呼ばれるため`handler.post()`経由でMainスレッドに渡す

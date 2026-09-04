@@ -30,6 +30,10 @@
     切替え(YOUTUBE_USE_NOCOOKIE)に自動追従させ、origin/host不一致によるエラー153を防ぐ。
     youtube-nocookie.comへの切替えは、広告関連リソース(doubleclick.net等)への問い合わせを
     行わないことでプロキシ遮断に起因するエラー152を回避できないかを試す対策。
+  - 動画尺通知(v1.90): onStateChangeでPLAYING(state=1)に遷移した時点でgetDuration()を読み、
+    onYoutubeDuration()でAndroid側へ通知する(1ロードにつき1回、durationNotifiedで抑止)。
+    ライブ配信はgetDuration()が0を返しonStateChange(ENDED)も永久に来ないため、
+    Android側(playToEndモードの安全弁タイマー)がこの値を見て自身のタイマーを締め直す。
 -->
 <html>
 <head>
@@ -85,6 +89,8 @@
     var playWatchdogElapsed = 0;
     var stalledNotified = false;
     var currentMuted = true;
+    // v1.90: 1ロードにつき動画尺を1回だけAndroidへ通知したかどうか
+    var durationNotified = false;
 
     // 再生開始watchdogの猶予秒数(v1.85、v1.89で12→20秒に延長): onReady後この秒数以内に
     // 再生状態(PLAYING)へ遷移しなければ再生不能とみなしonYoutubeStalled()を通知する。
@@ -148,6 +154,7 @@
       if (playWatchdogTimer) { clearInterval(playWatchdogTimer); playWatchdogTimer = null; }
       playWatchdogElapsed = 0;
       stalledNotified = false;
+      durationNotified = false;
       // プレイヤー生成watchdog: 15秒以内にonReadyが来なければ次へ進めるようエラー通知(v1.84)
       readyWatchdogTimer = setTimeout(function() {
         log('onReady watchdog timeout(15s)');
@@ -194,6 +201,17 @@
               clearInterval(playWatchdogTimer);
               playWatchdogTimer = null;
               log('watch cleared(playing)');
+            }
+            // v1.90: 再生開始時点の動画尺をAndroidへ通知する。ライブ配信はgetDuration()が0を
+            // 返しENDEDも永久に来ないため、Android側で安全弁タイマーを実測値で締め直す判断材料にする。
+            // PLAYINGはautoplay=trueのアクティブWebViewでしか起きないため、
+            // 先読み(INVISIBLE)WebViewからの誤通知は起こり得ない(追加のガード不要)。
+            if (event.data === 1 && !durationNotified) {
+              durationNotified = true;
+              var dur = 0;
+              try { if (player && typeof player.getDuration === 'function') { dur = player.getDuration(); } } catch (e) {}
+              log('duration=' + dur);
+              notify('onYoutubeDuration')(dur);
             }
             // YT.PlayerState.ENDED === 0
             if (event.data === 0) {
