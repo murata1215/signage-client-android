@@ -142,6 +142,27 @@ class PlayerActivity : ComponentActivity() {
     private var nextReadySpec: ProxySpec? = null
     private var prevReadySpec: ProxySpec? = null
 
+    /**
+     * v1.93: プロキシ境界切替(WebProxyManager.apply)の多重発火防止フラグ。
+     * doAdvance()/goToPrevious()が200msポーリングで何度も再入する間、apply()呼び出しを1回だけに絞る。
+     * apply()のonReadyコールバック内でfalseへ戻す。
+     */
+    private var proxySwitching = false
+    /** v1.93: 現在進行中のプロキシ境界切替の開始時刻(ms)。デバッグオーバーレイ用の所要時間計測に使う。0=進行中の切替なし */
+    private var proxySwitchStartMs = 0L
+    /** v1.93: 現在進行中のプロキシ境界切替のタイムアウト期限(ms)。この時刻を過ぎたらロード未完了でも強制的に進める。0=未設定 */
+    private var proxySwitchDeadlineMs = 0L
+    /** v1.93: 現在進行中のプロキシ境界切替の切替先ラベル(トグル表示用、例: "1.2.3.4:8080" / "direct") */
+    private var proxySwitchTargetLabel: String = ""
+    /** v1.93: 直近完了したプロキシ境界切替の結果(デバッグオーバーレイ3ページ目表示用) */
+    private var lastProxySwitchInfo: String = "なし"
+    /**
+     * v1.93: プロキシ境界切替時、preloadScreen(force=true)によるロード完了(markPreloadReady)を
+     * 待つ最大時間(ms)。ページがonPageFinished/onYoutubeReadyを返さない場合に無限に待ち続けて
+     * 再生が永久停止することを防ぐための保険。超過時は未完了でも強制的に次/前へ進める。
+     */
+    private val PROXY_LOAD_TIMEOUT_MS = 20000L
+
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
     private var longPressResetRunnable: Runnable? = null
@@ -460,6 +481,13 @@ class PlayerActivity : ComponentActivity() {
         // ── プロキシ(v1.92: コンテンツ単位use_proxy/proxy_urlをWebProxyManagerが解釈) ──
         val webProxySpec = WebProxyManager.current
         sb.append("WebProxy: ${webProxySpec?.toRule() ?: "なし（direct）"}\n")
+        // v1.93: プロキシ境界切替の所要時間(直近1回分)。進行中の切替があればその旨も表示する
+        if (proxySwitchStartMs != 0L) {
+            val inProgressSec = (System.currentTimeMillis() - proxySwitchStartMs) / 1000.0
+            sb.append("直近切替: $proxySwitchTargetLabel / 切替中${"%.1f".format(inProgressSec)}秒経過\n")
+        } else {
+            sb.append("直近切替: $lastProxySwitchInfo\n")
+        }
         val curScreen = flatScreens.getOrNull(currentScreenIndex)
         val curItem = curScreen?.item
         if (curItem != null) {
@@ -805,23 +833,45 @@ class PlayerActivity : ComponentActivity() {
             // v1.92: prevWebViewの内容が「現在必要なプロキシ状態」でロードされていない場合
             // (先読みスキップ済み、またはローテーション再利用が別プロキシ状態だった場合)は
             // 通常のready待ちではなく、切替タイミングでWebProxyManager.apply→直接ロードを行う。
+            // v1.93: apply完了後はloadScreen()を直接呼んで即readyにするのではなく
+            // preloadScreen(force=true)を経由し、ロード完了(markPreloadReady)を待つ通常の
+            // ready待ち経路へ合流させる(ロードを待たずクロスフェードしていたv1.92のバグ修正)。
             if (prevReady && prevReadySpec == targetSpec) {
+                if (proxySwitchStartMs != 0L) finishProxySwitch(timedOut = false)
                 doPreviousSwap()
             } else if (targetSpec != currentProxySpec()) {
-                addDebugLog("[PROXY] 切替実行(戻る) → ${targetSpec?.toRule() ?: "direct"}")
-                WebProxyManager.apply(targetSpec) {
-                    loadScreen(prevWebView!!, prevScreen)
-                    prevReady = true
-                    prevReadySpec = targetSpec
-                    doPreviousSwap()
+                if (!proxySwitching) {
+                    proxySwitching = true
+                    proxySwitchStartMs = System.currentTimeMillis()
+                    proxySwitchTargetLabel = targetSpec?.toRule() ?: "direct"
+                    proxySwitchDeadlineMs = proxySwitchStartMs + PROXY_LOAD_TIMEOUT_MS
+                    addDebugLog("[PROXY] 切替実行(戻る) → $proxySwitchTargetLabel")
+                    WebProxyManager.apply(targetSpec) {
+                        proxySwitching = false
+                        prevReady = false
+                        preloadScreen(prevWebView!!, prevScreen, isPrevPreload = true, force = true)
+                        goToPrevious()
+                    }
+                } else {
+                    handler.postDelayed({ goToPrevious() }, 200)
                 }
             } else {
                 handler.post(object : Runnable {
                     override fun run() {
+                        // v1.93: ロードが完了しない場合のタイムアウト保険
+                        if (proxySwitchDeadlineMs != 0L && System.currentTimeMillis() > proxySwitchDeadlineMs) {
+                            addDebugLog("[PROXY] ロード待ちタイムアウト(戻る)(${PROXY_LOAD_TIMEOUT_MS / 1000}秒) → 強制的に前へ")
+                            prevReady = true
+                            prevReadySpec = targetSpec
+                            finishProxySwitch(timedOut = true)
+                            doPreviousSwap()
+                            return
+                        }
                         if (!prevReady || prevReadySpec != targetSpec) {
                             handler.postDelayed(this, 200)
                             return
                         }
+                        if (proxySwitchStartMs != 0L) finishProxySwitch(timedOut = false)
                         doPreviousSwap()
                     }
                 })
@@ -1573,6 +1623,22 @@ class PlayerActivity : ComponentActivity() {
 
     /** 現在プロセスに適用されているプロキシ状態(WebProxyManagerの実際の適用値) */
     private fun currentProxySpec(): ProxySpec? = WebProxyManager.current
+
+    /**
+     * v1.93: 進行中のプロキシ境界切替を完了扱いにし、所要時間をデバッグオーバーレイ用に記録する。
+     * proxySwitchStartMs==0(進行中の切替が無い)なら何もしない。
+     * timedOut=trueの場合はロード完了を待たずタイムアウトで強制的に進めたことを表す。
+     */
+    private fun finishProxySwitch(timedOut: Boolean) {
+        if (proxySwitchStartMs == 0L) return
+        val elapsedSec = (System.currentTimeMillis() - proxySwitchStartMs) / 1000.0
+        val status = if (timedOut) "タイムアウト" else "ロード待ち"
+        lastProxySwitchInfo = "$proxySwitchTargetLabel / $status${"%.1f".format(elapsedSec)}秒"
+        addDebugLog("[PROXY] 切替完了: $lastProxySwitchInfo")
+        proxySwitchStartMs = 0L
+        proxySwitchDeadlineMs = 0L
+        proxySwitchTargetLabel = ""
+    }
 
     /**
      * プレイリスト中でuse_proxy=trueかつproxy_urlが設定されている最初の項目からProxySpecを
@@ -2334,18 +2400,40 @@ class PlayerActivity : ComponentActivity() {
             if (targetSpec != currentProxySpec()) {
                 // v1.92: nextWebViewの内容が現在必要なプロキシ状態でロードされていない
                 // (先読みスキップ済み、またはローテーション再利用が別プロキシ状態だった場合)。
-                // 裏で切り替えず、切替タイミングでWebProxyManager.apply→直接ロードを直列実行する。
-                addDebugLog("[PROXY] 切替実行 → ${targetSpec?.toRule() ?: "direct"}")
-                WebProxyManager.apply(targetSpec) {
-                    loadScreen(nextWebView!!, nextScreen0)
-                    nextReady = true
-                    nextReadySpec = targetSpec
-                    doAdvance()
+                // v1.93: 切替タイミングでWebProxyManager.apply()を直列実行するのは変わらないが、
+                // apply完了後はloadScreen()を直接呼んで即readyにするのではなく
+                // preloadScreen(force=true)を経由し、ロード完了(markPreloadReady)を待つ通常の
+                // ready待ち経路へ合流させる(ロードを待たずクロスフェードしていたv1.92のバグ修正)。
+                // apply()の多重発火防止にproxySwitchingガードを使う。
+                if (!proxySwitching) {
+                    proxySwitching = true
+                    proxySwitchStartMs = System.currentTimeMillis()
+                    proxySwitchTargetLabel = targetSpec?.toRule() ?: "direct"
+                    proxySwitchDeadlineMs = proxySwitchStartMs + PROXY_LOAD_TIMEOUT_MS
+                    addDebugLog("[PROXY] 切替実行 → $proxySwitchTargetLabel")
+                    WebProxyManager.apply(targetSpec) {
+                        proxySwitching = false
+                        nextReady = false
+                        preloadScreen(nextWebView!!, nextScreen0, isPrevPreload = false, force = true)
+                        doAdvance()
+                    }
                 }
+                handler.postDelayed({ doAdvance() }, 200)
                 return
             }
-            handler.postDelayed({ doAdvance() }, 200)
-            return
+            // v1.93: 境界切替後のready待ち。ページがonPageFinished/onYoutubeReadyを返さない
+            // 場合に無限に待ち続けないよう、タイムアウト経過時は未完了でも強制的に次へ進める。
+            if (proxySwitchDeadlineMs != 0L && System.currentTimeMillis() > proxySwitchDeadlineMs) {
+                addDebugLog("[PROXY] ロード待ちタイムアウト(${PROXY_LOAD_TIMEOUT_MS / 1000}秒) → 強制的に次へ")
+                nextReady = true
+                nextReadySpec = targetSpec
+                finishProxySwitch(timedOut = true)
+            } else {
+                handler.postDelayed({ doAdvance() }, 200)
+                return
+            }
+        } else if (proxySwitchStartMs != 0L) {
+            finishProxySwitch(timedOut = false)
         }
 
         val oldScreen = flatScreens.getOrNull(currentScreenIndex)
@@ -2410,11 +2498,16 @@ class PlayerActivity : ComponentActivity() {
      * 裏読み込みを行わない(WebProxyManagerはプロセス全体に効くため、表示中コンテンツの
      * 通信に影響を与えないため)。この場合ready flagは立てず、実際のロードは
      * doAdvance()/goToPrevious()側が切替タイミングで直列実行する。
+     * v1.93: force=trueのときはこのプロキシ状態ガードをスキップして先読み処理
+     * (webViewClient設定・markPreloadReady呼び出しを含む)を実行する。境界切替時、
+     * WebProxyManager.apply()完了後(=currentProxySpec()がtargetSpecに一致した後)に
+     * doAdvance()/goToPrevious()から呼ばれ、ロード完了(onPageFinished/onYoutubeReady)を
+     * 待つ通常のready待ち経路へ合流させるために使う。
      */
-    private fun preloadScreen(webView: WebView, screen: FlatScreen, isPrevPreload: Boolean) {
+    private fun preloadScreen(webView: WebView, screen: FlatScreen, isPrevPreload: Boolean, force: Boolean = false) {
         val preloadType = if (isPrevPreload) "prev" else "next"
         val targetSpec = specFor(screen)
-        if (targetSpec != currentProxySpec()) {
+        if (!force && targetSpec != currentProxySpec()) {
             addDebugLog("[PROXY] $preloadType 先読みスキップ(プロキシ切替が必要): ${screen.displayName}")
             return
         }
