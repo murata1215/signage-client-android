@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -114,6 +115,8 @@ class PlayerActivity : ComponentActivity() {
     private val ytNetErrorHosts = LinkedHashSet<String>()
     /** ytNetErrorHostsに記録する上限件数。ローリングログ(20行)が埋まるのを防ぐ(v1.89) */
     private val YT_NET_LOG_MAX = 8
+    /** web画面(type="web")用WebViewClientが1回のロードあたりに記録するネットワークエラー件数の上限(v1.95) */
+    private val WEB_NET_LOG_MAX = 5
 
     private val handler = Handler(Looper.getMainLooper())
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -490,7 +493,13 @@ class PlayerActivity : ComponentActivity() {
         }
         // ── プロキシ(v1.92: コンテンツ単位use_proxy/proxy_urlをWebProxyManagerが解釈) ──
         val webProxySpec = WebProxyManager.current
-        sb.append("WebProxy: ${webProxySpec?.toRule() ?: "なし（direct）"}\n")
+        sb.append("WebProxy: ${webProxySpec?.toRule() ?: "direct（明示上書き）"}\n")
+        // v1.95: 端末側のシステム/Wi-Fiプロキシ。アプリは常に上書きするので参考値だが、
+        // 「clearProxyOverrideでこれが復活していた」類の事故の切り分けに必須。
+        val sysProxy = try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).defaultProxy
+        } catch (_: Exception) { null }
+        sb.append("端末プロキシ(system): ${sysProxy?.let { "${it.host}:${it.port}" } ?: "なし"}\n")
         // v1.93: プロキシ境界切替の所要時間(直近1回分)。進行中の切替があればその旨も表示する
         if (proxySwitchStartMs != 0L) {
             val inProgressSec = (System.currentTimeMillis() - proxySwitchStartMs) / 1000.0
@@ -2018,6 +2027,59 @@ class PlayerActivity : ComponentActivity() {
         view?.evaluateJavascript("if(window.ytMute)ytMute();if(window.ytStop)ytStop();", null)
     }
 
+    /**
+     * web画面(type="web")用WebViewClientを生成する共通ヘルパー(v1.95)。
+     * 従来はloadScreen()内("web"分岐)とpreloadScreen()内("web"分岐)にそれぞれ別々の匿名
+     * WebViewClientとして重複実装されており、YouTube用createYoutubeWebViewClient()と違って
+     * onReceivedError/onReceivedHttpErrorが無くネットワークエラーが一切ログに残らなかった。
+     * *.internal.tisaweb.or.jp のような「黒画面のまま表示秒数だけ消化する」不具合の診断に必須のため追加する。
+     *
+     * onPageFinished内の既存処理(injectWideViewport/scheduleAutoFit)はそのまま維持し、
+     * preloadType!=nullのとき(preloadScreen()経由)だけmarkPreloadReady()を呼ぶ
+     * (preloadType==null、すなわちloadScreen()経由の場合は元々呼ばれていなかった挙動を維持する)。
+     * onReceivedError/onReceivedHttpErrorはワーカースレッドから呼ばれ得るため、必ずhandler.post()で
+     * メインスレッド経由にする(addDebugLog()がdebugPage==1のときTextViewを直接触るため、v1.87/v1.89と同じ制約)。
+     * サブリソース大量失敗時のログ洪水を防ぐため、1回のロード(=この関数呼び出し1回)あたり
+     * 先頭WEB_NET_LOG_MAX件までに制限する(ローカル変数のクロージャで画面ごとに独立してカウントする)。
+     */
+    private fun createWebScreenWebViewClient(preloadType: String?): WebViewClient {
+        var errorCount = 0
+        fun logWebNetError(request: WebResourceRequest?, detail: String) {
+            val host = request?.url?.host ?: "?"
+            val path = request?.url?.path ?: ""
+            val main = request?.isForMainFrame == true
+            handler.post {
+                if (errorCount >= WEB_NET_LOG_MAX) return@post
+                errorCount++
+                addDebugLog("[WEB] $host$path $detail main=$main")
+            }
+        }
+        return object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                injectWideViewport(view)
+                scheduleAutoFit(view, url)
+                if (preloadType != null) {
+                    markPreloadReady(preloadType)
+                }
+            }
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                val crashed = detail?.didCrash() == true
+                addDebugLog("[WEBVIEW] Render process gone in web view (crashed=$crashed)")
+                handleWebViewCrash(view)
+                return true
+            }
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                logWebNetError(request, "err=${error?.errorCode} ${error?.description}")
+            }
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                logWebNetError(request, "http=${errorResponse?.statusCode}")
+            }
+        }
+    }
+
     /** スクリーンをWebViewにロードする */
     private fun loadScreen(webView: WebView, screen: FlatScreen) {
         webView.setInitialScale(100)
@@ -2025,19 +2087,7 @@ class PlayerActivity : ComponentActivity() {
         when (screen.type) {
             "web" -> {
                 webView.setInitialScale(webInitialScale)
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        injectWideViewport(view)
-                        scheduleAutoFit(view, url)
-                    }
-                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                        val crashed = detail?.didCrash() == true
-                        addDebugLog("[WEBVIEW] Render process gone in web view (crashed=$crashed)")
-                        handleWebViewCrash(view)
-                        return true
-                    }
-                }
+                webView.webViewClient = createWebScreenWebViewClient(preloadType = null)
                 webView.loadUrl(screen.url ?: return)
             }
             "pdf" -> {
@@ -2553,20 +2603,7 @@ class PlayerActivity : ComponentActivity() {
         when (screen.type) {
             "web" -> {
                 webView.setInitialScale(webInitialScale)
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        injectWideViewport(view)
-                        scheduleAutoFit(view, url)
-                        markPreloadReady(preloadType)
-                    }
-                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                        val crashed = detail?.didCrash() == true
-                        addDebugLog("[WEBVIEW] Render process gone in preload view (crashed=$crashed)")
-                        handleWebViewCrash(view)
-                        return true
-                    }
-                }
+                webView.webViewClient = createWebScreenWebViewClient(preloadType)
                 webView.loadUrl(screen.url ?: return)
             }
             "pdf" -> {

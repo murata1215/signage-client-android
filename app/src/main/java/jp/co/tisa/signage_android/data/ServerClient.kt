@@ -23,6 +23,7 @@ class ServerClient(private val config: SignageConfig) {
 
     private val directClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .proxy(java.net.Proxy.NO_PROXY) // v1.95: 端末のシステムプロキシを拾わせない
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()

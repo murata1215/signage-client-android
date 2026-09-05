@@ -50,21 +50,23 @@ object WebProxyManager {
             return
         }
         try {
-            if (target != null) {
-                val config = ProxyConfig.Builder()
+            val config = if (target != null) {
+                ProxyConfig.Builder()
                     .addProxyRule(target.toRule())
                     .build()
-                ProxyController.getInstance().setProxyOverride(config, mainExecutor) {
-                    current = target
-                    initialized = true
-                    onReady()
-                }
             } else {
-                ProxyController.getInstance().clearProxyOverride(mainExecutor) {
-                    current = null
-                    initialized = true
-                    onReady()
-                }
+                // v1.95: clearProxyOverride()は「システムプロキシへ戻す」であってdirect強制ではない。
+                // 端末のシステム/Wi-Fi設定にプロキシが入っていると use_proxy=0 のコンテンツまで
+                // そのプロキシ経由になってしまう(実機で*.internal.tisaweb.or.jpが黒画面化する原因)。
+                // use_proxy=0 を確実にdirectにするため、明示的なdirect上書きを設定する。
+                ProxyConfig.Builder()
+                    .addDirect()
+                    .build()
+            }
+            ProxyController.getInstance().setProxyOverride(config, mainExecutor) {
+                current = target
+                initialized = true
+                onReady()
             }
         } catch (e: Exception) {
             // 失敗してもアプリを止めず direct 扱いにフォールバックする
