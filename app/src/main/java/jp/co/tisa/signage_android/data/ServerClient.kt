@@ -8,43 +8,24 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.FileOutputStream
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
+/**
+ * サーバー通信は常にdirect固定(v1.92)。
+ * プロキシはコンテンツ単位(use_proxy/proxy_url、サーバー側で実装済み)で指定するため、
+ * 端末固定の社内プロキシ設定・ドメインバイパスリストは廃止した。
+ * WebView側のコンテンツ単位プロキシ適用は player.WebProxyManager が担当する。
+ */
 class ServerClient(private val config: SignageConfig) {
 
     private val gson = Gson()
-
-    private val proxyHost = "210.175.128.100"
-    private val proxyPort = 8080
-    private val bypassPrefixes = listOf(
-        "10.", "172.16.", "172.17.", "172.18.", "172.19.",
-        "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
-        "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
-        "172.30.", "172.31.", "192.168.", "localhost", "127.0.0.1",
-        "atg.co.jp", "tisaweb.or.jp"
-    )
-
-    private val proxyClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(proxyHost, proxyPort)))
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .build()
-    }
 
     private val directClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
-    }
-
-    private fun getClient(url: String): OkHttpClient {
-        val needsProxy = bypassPrefixes.none { url.contains(it) }
-        return if (needsProxy) proxyClient else directClient
     }
 
     private fun buildPlayerUrl(endpoint: String): String {
@@ -55,7 +36,7 @@ class ServerClient(private val config: SignageConfig) {
         try {
             val url = buildPlayerUrl("/api/player/schedule")
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: return@withContext null
@@ -77,7 +58,7 @@ class ServerClient(private val config: SignageConfig) {
                 .url(url)
                 .post(ByteArray(0).toRequestBody(null))
                 .build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { it.isSuccessful }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -89,7 +70,7 @@ class ServerClient(private val config: SignageConfig) {
         try {
             val url = buildPlayerUrl("/api/player/content/$contentId/file")
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 if (resp.isSuccessful) {
                     resp.body?.byteStream()?.use { input ->
@@ -112,7 +93,7 @@ class ServerClient(private val config: SignageConfig) {
         try {
             val url = buildPlayerUrl("/api/player/schedule")
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 when {
                     resp.isSuccessful -> ConnectionTestResult(true, "接続成功")
@@ -130,7 +111,7 @@ class ServerClient(private val config: SignageConfig) {
         try {
             val url = "${config.serverUrl}/api/player/unassigned-clients"
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: return@withContext null
@@ -149,7 +130,7 @@ class ServerClient(private val config: SignageConfig) {
         try {
             val url = buildPlayerUrl("/api/player/update/check")
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: return@withContext null
@@ -165,15 +146,29 @@ class ServerClient(private val config: SignageConfig) {
     }
 
     /**
+     * プロキシ指定ありでYouTube疎通プローブを行う際にだけ使う一時OkHttpClient。
+     * 通常のサーバー通信(directClient)には影響しない(v1.92)。
+     */
+    private fun probeClientFor(proxy: ProxySpec?): OkHttpClient {
+        if (proxy == null) return directClient
+        return OkHttpClient.Builder()
+            .proxy(proxy.toJavaProxy())
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
      * YouTube関連ドメインへの疎通プローブ(v1.85、v1.89でdoubleclick等の広告/認証系を追加)。
      * 152-4等のYouTube再生エラーが「プロキシがgooglevideo.com等の配信/認証系ドメインを
      * 塞いでいる」ことに起因していないかを実測で切り分けるための診断用メソッド。
-     * 既存のプロキシ設定(getClient())をそのまま再利用する。
      * 戻り値はデバッグオーバーレイに1行で表示する簡易フォーマット。
      * v1.89: 埋め込みプレイヤーが再生前に問い合わせる広告ステータス(static.doubleclick.net等)が
      * プロキシで遮断されエラー152の原因になっている疑いがあるため、対象ドメインを追加した。
+     * v1.92: 端末固定プロキシの廃止に伴い、呼び出し側がプレイリスト中の use_proxy=true 項目の
+     * proxy_url を渡した場合だけ、その一時OkHttpClientで疎通確認する(渡されなければdirect)。
      */
-    suspend fun probeYoutubeConnectivity(): String = withContext(Dispatchers.IO) {
+    suspend fun probeYoutubeConnectivity(proxy: ProxySpec? = null): String = withContext(Dispatchers.IO) {
         val targets = listOf(
             "yt" to "https://www.youtube.com/favicon.ico",
             "google" to "https://www.google.com/generate_204",
@@ -186,10 +181,11 @@ class ServerClient(private val config: SignageConfig) {
             "jnnpa" to "https://jnn-pa.googleapis.com/favicon.ico",
             "pglog" to "https://play.google.com/generate_204"
         )
+        val client = probeClientFor(proxy)
         val results = targets.map { (label, url) ->
             val status = try {
                 val request = Request.Builder().url(url).get().build()
-                val response = getClient(url).newCall(request).execute()
+                val response = client.newCall(request).execute()
                 response.use { it.code.toString() }
             } catch (e: Exception) {
                 "NG(${e.javaClass.simpleName})"
@@ -215,7 +211,7 @@ class ServerClient(private val config: SignageConfig) {
                 "${config.serverUrl}$downloadPath${if (downloadPath.contains("?")) "&" else "?"}key=${config.clientKey}"
             }
             val request = Request.Builder().url(url).get().build()
-            val response = getClient(url).newCall(request).execute()
+            val response = directClient.newCall(request).execute()
             response.use { resp ->
                 if (resp.isSuccessful) {
                     resp.body?.byteStream()?.use { input ->

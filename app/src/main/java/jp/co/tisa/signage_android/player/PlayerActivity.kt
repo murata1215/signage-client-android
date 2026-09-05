@@ -34,10 +34,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.core.view.WindowCompat
-import androidx.webkit.ProxyConfig
-import androidx.webkit.ProxyController
 import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -47,6 +44,7 @@ import android.graphics.drawable.GradientDrawable
 import android.util.Base64
 import jp.co.tisa.signage_android.data.ConfigManager
 import jp.co.tisa.signage_android.data.PlaylistItem
+import jp.co.tisa.signage_android.data.ProxySpec
 import jp.co.tisa.signage_android.data.ServerClient
 import kotlinx.coroutines.*
 import java.io.ByteArrayInputStream
@@ -135,6 +133,14 @@ class PlayerActivity : ComponentActivity() {
     private var isPaused = false
     private var nextReady = false
     private var prevReady = false
+    /**
+     * next/prevWebViewが実際にロード済みのプロキシ状態(v1.92)。
+     * next/prevReady==trueのときだけ意味を持つ(WebProxyManager.currentとの照合用)。
+     * 現在アクティブなコンテンツと異なるプロキシ状態の画面は先読み禁止のため、ここが一致しない
+     * 場合はready扱いにせず、切替タイミングでWebProxyManager.apply()を直列実行する。
+     */
+    private var nextReadySpec: ProxySpec? = null
+    private var prevReadySpec: ProxySpec? = null
 
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
@@ -207,10 +213,9 @@ class PlayerActivity : ComponentActivity() {
         // Setup gesture detector
         setupGestureDetector()
 
-        // Setup WebView proxy (before creating WebViews)
-        setupWebViewProxy()
-
         // Setup views
+        // (v1.92: WebViewのプロキシは端末固定ではなくコンテンツ単位。WebProxyManagerが
+        // 各コンテンツロード時に適用するため、起動時の固定プロキシ設定は行わない)
         setupViews()
 
         // Initialize managers
@@ -254,9 +259,11 @@ class PlayerActivity : ComponentActivity() {
         }
 
         // YouTube関連ドメインへの疎通プローブ(起動時に1回)(v1.85)
+        // v1.92: 端末固定プロキシは廃止。スケジュール未取得時点ではproxySpecFromPlaylist()はnullを
+        // 返す(=direct)。実際の対象はrerunYoutubeProbeIfNeeded()側(YouTube画面到達時)で再測定する。
         coroutineScope.launch(Dispatchers.IO) {
             try {
-                val result = serverClient.probeYoutubeConnectivity()
+                val result = serverClient.probeYoutubeConnectivity(proxySpecFromPlaylist())
                 withContext(Dispatchers.Main) {
                     youtubeProbeResult = result
                     addDebugLog("[YT] 疎通 $result")
@@ -450,7 +457,19 @@ class PlayerActivity : ComponentActivity() {
         } catch (_: Exception) {
             sb.append("ネットワーク: 取得失敗\n")
         }
-        sb.append("プロキシ: 210.175.128.100:8080\n")
+        // ── プロキシ(v1.92: コンテンツ単位use_proxy/proxy_urlをWebProxyManagerが解釈) ──
+        val webProxySpec = WebProxyManager.current
+        sb.append("WebProxy: ${webProxySpec?.toRule() ?: "なし（direct）"}\n")
+        val curScreen = flatScreens.getOrNull(currentScreenIndex)
+        val curItem = curScreen?.item
+        if (curItem != null) {
+            val proxyUrlDisplay = curItem.proxyUrl ?: "-"
+            sb.append("現在コンテンツ: ${curScreen.displayName} / use_proxy=${curItem.useProxy} / proxy_url=$proxyUrlDisplay\n")
+            if (curItem.useProxy && !curItem.proxyUrl.isNullOrBlank() && ProxySpec.parse(curItem.proxyUrl) == null) {
+                sb.append("⚠ プロキシURL不正 (directにフォールバック中)\n")
+            }
+        }
+        sb.append("サーバー通信: direct（固定）\n")
 
         // ── WebView / YouTube診断(v1.85) ──
         sb.append("${"─".repeat(20)}\n")
@@ -759,7 +778,7 @@ class PlayerActivity : ComponentActivity() {
         if (isPaused) {
             currentScreenIndex = (currentScreenIndex + 1) % flatScreens.size
             val screen = flatScreens[currentScreenIndex]
-            loadScreen(activeWebView!!, screen)
+            loadScreenWithProxy(activeWebView!!, screen)
             statusBar.text = formatStatusText(screen.displayTitle, "⏸ 一時停止中 (戻るで再開)")
         } else {
             advanceToNext()
@@ -776,16 +795,30 @@ class PlayerActivity : ComponentActivity() {
         if (isPaused) {
             currentScreenIndex = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
             val screen = flatScreens[currentScreenIndex]
-            loadScreen(activeWebView!!, screen)
+            loadScreenWithProxy(activeWebView!!, screen)
             statusBar.text = formatStatusText(screen.displayTitle, "⏸ 一時停止中 (戻るで再開)")
         } else {
-            // If prev is ready, swap immediately; otherwise wait
-            if (prevReady) {
+            val prevIdx = (currentScreenIndex - 1 + flatScreens.size) % flatScreens.size
+            val prevScreen = flatScreens[prevIdx]
+            val targetSpec = specFor(prevScreen)
+
+            // v1.92: prevWebViewの内容が「現在必要なプロキシ状態」でロードされていない場合
+            // (先読みスキップ済み、またはローテーション再利用が別プロキシ状態だった場合)は
+            // 通常のready待ちではなく、切替タイミングでWebProxyManager.apply→直接ロードを行う。
+            if (prevReady && prevReadySpec == targetSpec) {
                 doPreviousSwap()
+            } else if (targetSpec != currentProxySpec()) {
+                addDebugLog("[PROXY] 切替実行(戻る) → ${targetSpec?.toRule() ?: "direct"}")
+                WebProxyManager.apply(targetSpec) {
+                    loadScreen(prevWebView!!, prevScreen)
+                    prevReady = true
+                    prevReadySpec = targetSpec
+                    doPreviousSwap()
+                }
             } else {
                 handler.post(object : Runnable {
                     override fun run() {
-                        if (!prevReady) {
+                        if (!prevReady || prevReadySpec != targetSpec) {
                             handler.postDelayed(this, 200)
                             return
                         }
@@ -829,8 +862,9 @@ class PlayerActivity : ComponentActivity() {
         updateScreenStatusBar(screen)
         startPdfPageRotation(screen)
 
-        // nextReady is true (old active already had content)
+        // nextReady is true (old active already had content, loaded under oldScreen's proxy spec)
         nextReady = true
+        nextReadySpec = specFor(oldScreen)
 
         // Schedule next auto-advance
         scheduleAutoAdvance(screen)
@@ -1054,54 +1088,6 @@ class PlayerActivity : ComponentActivity() {
     // =========================================================================
     // View Setup
     // =========================================================================
-
-    /**
-     * WebViewのプロキシ設定。社内プロキシを経由しつつ、
-     * ローカルIPや社内ドメインはバイパスする。
-     */
-    private fun setupWebViewProxy() {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            addDebugLog("[PROXY] ProxyController not supported on this device")
-            return
-        }
-        try {
-            val proxyConfig = ProxyConfig.Builder()
-                .addProxyRule("210.175.128.100:8080")
-                // ローカルIPレンジをバイパス
-                .addBypassRule("10.*")
-                .addBypassRule("172.16.*")
-                .addBypassRule("172.17.*")
-                .addBypassRule("172.18.*")
-                .addBypassRule("172.19.*")
-                .addBypassRule("172.20.*")
-                .addBypassRule("172.21.*")
-                .addBypassRule("172.22.*")
-                .addBypassRule("172.23.*")
-                .addBypassRule("172.24.*")
-                .addBypassRule("172.25.*")
-                .addBypassRule("172.26.*")
-                .addBypassRule("172.27.*")
-                .addBypassRule("172.28.*")
-                .addBypassRule("172.29.*")
-                .addBypassRule("172.30.*")
-                .addBypassRule("172.31.*")
-                .addBypassRule("192.168.*")
-                .addBypassRule("localhost")
-                .addBypassRule("127.0.0.1")
-                // 社内ドメインをバイパス
-                .addBypassRule("*.atg.co.jp")
-                .addBypassRule("*.tisaweb.or.jp")
-                .addBypassRule("*.internal.*")
-                .build()
-            ProxyController.getInstance().setProxyOverride(
-                proxyConfig,
-                { it.run() },  // executor: run on caller thread
-                { addDebugLog("[PROXY] WebView proxy configured") }
-            )
-        } catch (e: Exception) {
-            addDebugLog("[PROXY] Failed to set WebView proxy: ${e.message}")
-        }
-    }
 
     private fun setupFullScreen() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -1566,6 +1552,49 @@ class PlayerActivity : ComponentActivity() {
     private fun sameScreens(a: List<FlatScreen>, b: List<FlatScreen>): Boolean =
         a.size == b.size && a.indices.all { screenKey(a[it]) == screenKey(b[it]) }
 
+    // =========================================================================
+    // Content-scoped proxy (v1.92: use_proxy / proxy_url をサーバーから受け取り解釈する)
+    // =========================================================================
+
+    /**
+     * 画面のuse_proxy/proxy_urlからProxySpecを算出する。use_proxy=falseまたはproxy_urlが
+     * 不正な場合はnull(direct)。パース失敗時はデバッグログに警告を残し、例外は投げずdirectへ
+     * フォールバックする(アプリを止めない)。
+     */
+    private fun specFor(screen: FlatScreen?): ProxySpec? {
+        val item = screen?.item ?: return null
+        if (!item.useProxy) return null
+        val spec = ProxySpec.parse(item.proxyUrl)
+        if (spec == null) {
+            addDebugLog("[PROXY] proxy_url不正のためdirectにフォールバック: ${screen.displayName} url=${item.proxyUrl}")
+        }
+        return spec
+    }
+
+    /** 現在プロセスに適用されているプロキシ状態(WebProxyManagerの実際の適用値) */
+    private fun currentProxySpec(): ProxySpec? = WebProxyManager.current
+
+    /**
+     * プレイリスト中でuse_proxy=trueかつproxy_urlが設定されている最初の項目からProxySpecを
+     * 算出する(YouTube疎通プローブ用、v1.92)。無ければnull(direct)。
+     */
+    private fun proxySpecFromPlaylist(): ProxySpec? {
+        val item = scheduleManager.playlist.firstOrNull { it.useProxy && !it.proxyUrl.isNullOrBlank() }
+            ?: return null
+        return ProxySpec.parse(item.proxyUrl)
+    }
+
+    /**
+     * プロキシ状態を適用してからwebViewへコンテンツをロードする共通ヘルパー。
+     * 一時停止中の手動送り("goToNext"/"goToPrevious"のisPaused分岐)等、
+     * プリロード機構を経由しない単発ロード箇所で使う。
+     */
+    private fun loadScreenWithProxy(webView: WebView, screen: FlatScreen) {
+        WebProxyManager.apply(specFor(screen)) {
+            loadScreen(webView, screen)
+        }
+    }
+
     /** 現在のスクリーンを表示する */
     private fun displayCurrentScreen() {
         if (flatScreens.isEmpty()) return
@@ -1578,12 +1607,16 @@ class PlayerActivity : ComponentActivity() {
         isPaused = false
         disableWebViewInteraction()
 
-        // コンテンツロード
-        loadScreen(activeWebView!!, screen)
-        updateScreenStatusBar(screen)
-        scheduleAutoAdvance(screen)
-        startPdfPageRotation(screen)
-        preloadBothDirections()
+        // v1.92: 起動直後(または再表示)は「未適用」状態のため、最初のコンテンツロードで
+        // 必ず1回はWebProxyManager経由のset/clearを通す。
+        WebProxyManager.apply(specFor(screen)) {
+            // コンテンツロード
+            loadScreen(activeWebView!!, screen)
+            updateScreenStatusBar(screen)
+            scheduleAutoAdvance(screen)
+            startPdfPageRotation(screen)
+            preloadBothDirections()
+        }
     }
 
     /**
@@ -2039,7 +2072,7 @@ class PlayerActivity : ComponentActivity() {
         youtubeProbeRerunDone = true
         coroutineScope.launch(Dispatchers.IO) {
             try {
-                val result = serverClient.probeYoutubeConnectivity()
+                val result = serverClient.probeYoutubeConnectivity(proxySpecFromPlaylist())
                 withContext(Dispatchers.Main) {
                     youtubeProbeResult = result
                     addDebugLog("[YT] 疎通(再) $result")
@@ -2293,7 +2326,24 @@ class PlayerActivity : ComponentActivity() {
         if (!isPlaying || isPaused) return
         if (flatScreens.isEmpty()) return
 
-        if (!nextReady) {
+        val nextIdx0 = (currentScreenIndex + 1) % flatScreens.size
+        val nextScreen0 = flatScreens[nextIdx0]
+        val targetSpec = specFor(nextScreen0)
+
+        if (!nextReady || nextReadySpec != targetSpec) {
+            if (targetSpec != currentProxySpec()) {
+                // v1.92: nextWebViewの内容が現在必要なプロキシ状態でロードされていない
+                // (先読みスキップ済み、またはローテーション再利用が別プロキシ状態だった場合)。
+                // 裏で切り替えず、切替タイミングでWebProxyManager.apply→直接ロードを直列実行する。
+                addDebugLog("[PROXY] 切替実行 → ${targetSpec?.toRule() ?: "direct"}")
+                WebProxyManager.apply(targetSpec) {
+                    loadScreen(nextWebView!!, nextScreen0)
+                    nextReady = true
+                    nextReadySpec = targetSpec
+                    doAdvance()
+                }
+                return
+            }
             handler.postDelayed({ doAdvance() }, 200)
             return
         }
@@ -2331,8 +2381,9 @@ class PlayerActivity : ComponentActivity() {
         updateScreenStatusBar(screen)
         startPdfPageRotation(screen)
 
-        // prevReady is true (old active already had content)
+        // prevReady is true (old active already had content, loaded under oldScreen's proxy spec)
         prevReady = true
+        prevReadySpec = specFor(oldScreen)
 
         // Schedule next auto-advance
         scheduleAutoAdvance(screen)
@@ -2353,9 +2404,21 @@ class PlayerActivity : ComponentActivity() {
         preloadScreen(prevWebView!!, flatScreens[prevIdx], isPrevPreload = true)
     }
 
-    /** スクリーンを先読みWebViewにロード */
+    /**
+     * スクリーンを先読みWebViewにロード。
+     * v1.92: 対象画面のプロキシ状態(specFor)が現在表示中のプロキシ状態と異なる場合は
+     * 裏読み込みを行わない(WebProxyManagerはプロセス全体に効くため、表示中コンテンツの
+     * 通信に影響を与えないため)。この場合ready flagは立てず、実際のロードは
+     * doAdvance()/goToPrevious()側が切替タイミングで直列実行する。
+     */
     private fun preloadScreen(webView: WebView, screen: FlatScreen, isPrevPreload: Boolean) {
         val preloadType = if (isPrevPreload) "prev" else "next"
+        val targetSpec = specFor(screen)
+        if (targetSpec != currentProxySpec()) {
+            addDebugLog("[PROXY] $preloadType 先読みスキップ(プロキシ切替が必要): ${screen.displayName}")
+            return
+        }
+        if (isPrevPreload) prevReadySpec = targetSpec else nextReadySpec = targetSpec
         webView.setInitialScale(100)
         applyUserAgentForScreen(webView, screen)
         when (screen.type) {

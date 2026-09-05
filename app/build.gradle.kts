@@ -14,8 +14,8 @@ android {
         applicationId = "jp.co.tisa.signage_android"
         minSdk = 24
         targetSdk = 36
-        versionCode = 91
-        versionName = "1.91"
+        versionCode = 92
+        versionName = "1.92"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
