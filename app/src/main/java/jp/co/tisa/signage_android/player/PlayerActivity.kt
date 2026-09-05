@@ -163,6 +163,16 @@ class PlayerActivity : ComponentActivity() {
      */
     private val PROXY_LOAD_TIMEOUT_MS = 20000L
 
+    /**
+     * v1.94: 画面遷移(doAdvance/goToPrevious)のポーリングチェーンを常に1本に保つための世代番号。
+     * 外部起点(advanceToNext()経由のdoAdvance()呼び出し、リモコン/スワイプのgoToNext()/goToPrevious())
+     * でのみインクリメントし新しい世代を開始する。WebProxyManager.apply()のonReadyから継続する呼び出しや
+     * ready待ちのpostDelayedポーリングは同じ世代を引き継いでInternal版を直接呼ぶ。
+     * これにより、プロキシ境界を跨ぐたびに独立したポーリングチェーンが2本以上並走し、
+     * 表示秒数を待たずにadvance/backが二重発生するバグ(v1.93)を防ぐ。
+     */
+    private var transitionGeneration = 0
+
     // Long-press (5 sec) to reset to setup screen
     private val LONG_PRESS_RESET_MS = 5000L
     private var longPressResetRunnable: Runnable? = null
@@ -814,6 +824,15 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun goToPrevious() {
+        transitionGeneration++
+        goToPreviousInternal(transitionGeneration)
+    }
+
+    private fun goToPreviousInternal(gen: Int) {
+        if (gen != transitionGeneration) {
+            addDebugLog("[PLAY] 古い遷移チェーンを破棄(gen=$gen)")
+            return
+        }
         if (!isPlaying) return
         if (flatScreens.isEmpty()) return
         contentTimer?.let { handler.removeCallbacks(it) }
@@ -850,14 +869,18 @@ class PlayerActivity : ComponentActivity() {
                         proxySwitching = false
                         prevReady = false
                         preloadScreen(prevWebView!!, prevScreen, isPrevPreload = true, force = true)
-                        goToPrevious()
+                        goToPreviousInternal(gen)
                     }
                 } else {
-                    handler.postDelayed({ goToPrevious() }, 200)
+                    handler.postDelayed({ goToPreviousInternal(gen) }, 200)
                 }
             } else {
                 handler.post(object : Runnable {
                     override fun run() {
+                        if (gen != transitionGeneration) {
+                            addDebugLog("[PLAY] 古い遷移チェーンを破棄(gen=$gen)")
+                            return
+                        }
                         // v1.93: ロードが完了しない場合のタイムアウト保険
                         if (proxySwitchDeadlineMs != 0L && System.currentTimeMillis() > proxySwitchDeadlineMs) {
                             addDebugLog("[PROXY] ロード待ちタイムアウト(戻る)(${PROXY_LOAD_TIMEOUT_MS / 1000}秒) → 強制的に前へ")
@@ -2389,6 +2412,15 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun doAdvance() {
+        transitionGeneration++
+        doAdvanceInternal(transitionGeneration)
+    }
+
+    private fun doAdvanceInternal(gen: Int) {
+        if (gen != transitionGeneration) {
+            addDebugLog("[PLAY] 古い遷移チェーンを破棄(gen=$gen)")
+            return
+        }
         if (!isPlaying || isPaused) return
         if (flatScreens.isEmpty()) return
 
@@ -2405,6 +2437,9 @@ class PlayerActivity : ComponentActivity() {
                 // preloadScreen(force=true)を経由し、ロード完了(markPreloadReady)を待つ通常の
                 // ready待ち経路へ合流させる(ロードを待たずクロスフェードしていたv1.92のバグ修正)。
                 // apply()の多重発火防止にproxySwitchingガードを使う。
+                // v1.94: ここでの無条件postDelayedがガードのif文の外にあると、apply()のonReady起点の
+                // チェーンとpostDelayed起点のチェーンが2本並走してしまう(v1.93のバグ)。
+                // if/elseで必ずどちらか片方のみが継続するようにする。
                 if (!proxySwitching) {
                     proxySwitching = true
                     proxySwitchStartMs = System.currentTimeMillis()
@@ -2415,10 +2450,11 @@ class PlayerActivity : ComponentActivity() {
                         proxySwitching = false
                         nextReady = false
                         preloadScreen(nextWebView!!, nextScreen0, isPrevPreload = false, force = true)
-                        doAdvance()
+                        doAdvanceInternal(gen)
                     }
+                } else {
+                    handler.postDelayed({ doAdvanceInternal(gen) }, 200)
                 }
-                handler.postDelayed({ doAdvance() }, 200)
                 return
             }
             // v1.93: 境界切替後のready待ち。ページがonPageFinished/onYoutubeReadyを返さない
@@ -2429,7 +2465,7 @@ class PlayerActivity : ComponentActivity() {
                 nextReadySpec = targetSpec
                 finishProxySwitch(timedOut = true)
             } else {
-                handler.postDelayed({ doAdvance() }, 200)
+                handler.postDelayed({ doAdvanceInternal(gen) }, 200)
                 return
             }
         } else if (proxySwitchStartMs != 0L) {
